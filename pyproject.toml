@@ -37,9 +37,9 @@ phoenix = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/your-org/phoenix-observability"
-Documentation = "https://github.com/your-org/phoenix-observability#readme"
-Repository = "https://github.com/your-org/phoenix-observability"
+Homepage = "https://github.com/VinayVattipally-sparity/phoenix-observability"
+Documentation = "https://github.com/VinayVattipally-sparity/phoenix-observability#readme"
+Repository = "https://github.com/VinayVattipally-sparity/phoenix-observability"
 
 [tool.setuptools]
 packages = ["phoenix_observability"]
