@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "phoenix-observability"
 version = "0.1.0"
 description = "Unified LLM Observability Package for Phoenix + OpenTelemetry"
-authors = [{  }]
+authors = [{ name = "Vinay Vattipally", email = "vinay.vattipally@sparity.com" }]
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
