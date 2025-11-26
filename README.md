@@ -36,16 +36,21 @@ pip install phoenix-observability[phoenix]
 
 ## Quick Start
 
+**1. Create a `.env` file in your project root:**
+
+```env
+PHOENIX_ENDPOINT=https://phoenix-sparity.com
+ENVIRONMENT=dev
+SERVICE_NAME=my-llm-service
+```
+
+**2. Use the package in your code:**
+
 ```python
 from phoenix_observability import init_observability, instrument_llm
-from phoenix_observability.config import ObservabilityConfig
 
-# Initialize observability
-init_observability(
-    service_name="my-llm-service",
-    phoenix_endpoint="http://localhost:6006",
-    environment="dev"
-)
+# Initialize observability (reads from .env file)
+init_observability(service_name="my-llm-service")
 
 # Instrument your LLM calls
 @instrument_llm
@@ -66,7 +71,7 @@ config = ObservabilityConfig()
 
 ### Environment Variables
 
-- `PHOENIX_ENDPOINT`: Phoenix server endpoint (default: `http://localhost:6006`)
+- `PHOENIX_ENDPOINT`: Phoenix server endpoint (**required** - must be set in your `.env` file)
 - `ENVIRONMENT`: Deployment environment (default: `dev`)
 - `ENABLE_GPU_TRACKING`: Enable GPU monitoring (default: `false`)
 - `ENABLE_PII_TRACKING`: Enable PII detection (default: `true`)

@@ -17,10 +17,14 @@ class ObservabilityConfig:
 
     def __init__(self):
         """Initialize configuration from environment variables."""
-        # Phoenix endpoint
-        self.phoenix_endpoint: str = os.getenv(
-            "PHOENIX_ENDPOINT", "https://phoenix-sparity.com"
-        )
+        # Phoenix endpoint - must be set in .env file
+        phoenix_endpoint = os.getenv("PHOENIX_ENDPOINT")
+        if not phoenix_endpoint:
+            raise ValueError(
+                "PHOENIX_ENDPOINT environment variable is required. "
+                "Please set it in your .env file."
+            )
+        self.phoenix_endpoint: str = phoenix_endpoint
 
         # Environment
         self.environment: str = os.getenv("ENVIRONMENT", "dev")
