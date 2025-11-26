@@ -42,7 +42,7 @@ Documentation = "https://github.com/VinayVattipally-sparity/phoenix-observabilit
 Repository = "https://github.com/VinayVattipally-sparity/phoenix-observability"
 
 [tool.setuptools]
-packages = ["phoenix_observability"]
+packages = { find = {} }
 
 [tool.setuptools.package-data]
 "*" = ["*.md", "*.txt"]
