@@ -46,4 +46,3 @@ packages = ["phoenix_observability"]
 
 [tool.setuptools.package-data]
 "*" = ["*.md", "*.txt"]
-

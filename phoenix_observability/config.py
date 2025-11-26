@@ -19,7 +19,7 @@ class ObservabilityConfig:
         """Initialize configuration from environment variables."""
         # Phoenix endpoint
         self.phoenix_endpoint: str = os.getenv(
-            "PHOENIX_ENDPOINT", "http://localhost:6006"
+            "PHOENIX_ENDPOINT", "https://phoenix-sparity.com"
         )
 
         # Environment
@@ -94,4 +94,3 @@ def reset_config():
     """Reset the global configuration (useful for testing)."""
     global _config
     _config = None
-
