@@ -35,6 +35,19 @@ dependencies = [
 phoenix = [
     "arize-phoenix>=2.5.0",
 ]
+toxicity = [
+    "openai>=1.0.0",
+    "requests>=2.31.0",
+]
+validation = [
+    "pydantic>=2.0.0",
+]
+all = [
+    "arize-phoenix>=2.5.0",
+    "openai>=1.0.0",
+    "requests>=2.31.0",
+    "pydantic>=2.0.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/VinayVattipally-sparity/phoenix-observability"

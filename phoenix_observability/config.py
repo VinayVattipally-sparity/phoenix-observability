@@ -70,6 +70,11 @@ class ObservabilityConfig:
             "OTLP_INSECURE", "true"
         ).lower() == "true"  # Default to insecure for local development
 
+        # Toxicity detection settings
+        self.toxicity_detection_method: str = os.getenv(
+            "TOXICITY_DETECTION_METHOD", "auto"
+        ).lower()  # Options: 'auto', 'openai', 'perspective', 'heuristic'
+
     def __repr__(self) -> str:
         """String representation of configuration."""
         return (

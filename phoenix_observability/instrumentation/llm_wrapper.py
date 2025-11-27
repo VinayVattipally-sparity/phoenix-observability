@@ -233,7 +233,9 @@ def instrument_llm(
                         track_pii if track_pii is not None else config.enable_pii_tracking
                     )
                     if should_track_pii and response_text and isinstance(response_text, str):
-                        safety_flags = analyze_safety(response_text)
+                        # Use toxicity detection method from config
+                        toxicity_method = config.toxicity_detection_method if hasattr(config, 'toxicity_detection_method') else None
+                        safety_flags = analyze_safety(response_text, toxicity_method=toxicity_method)
                         
                         # Track PII with nested structure (matching previous implementation)
                         pii_detected = safety_flags.get("pii_detected", False)
@@ -265,18 +267,29 @@ def instrument_llm(
                         span.set_attribute("llm.safety.has_concerns", has_concerns)
                         span.set_attribute("llm.safety.blocked", False)  # Can be set based on moderation API response
                         
-                        # Track toxicity score
+                        # Track toxicity score and details
                         toxicity_score = safety_flags.get("toxicity_score", 0.0)
+                        toxicity_method = safety_flags.get("toxicity_method", "heuristic")
+                        toxicity_flagged = safety_flags.get("toxicity_flagged", False)
+                        toxicity_categories = safety_flags.get("toxicity_categories", {})
+                        
                         span.set_attribute("llm.safety.toxicity_score", toxicity_score)
                         span.set_attribute("safety.toxicity_score", toxicity_score)  # Also set flat
+                        span.set_attribute("safety.toxicity_method", toxicity_method)
+                        span.set_attribute("safety.toxicity_flagged", toxicity_flagged)
+                        
+                        # Track detailed toxicity categories if available
+                        if toxicity_categories:
+                            for category, score in toxicity_categories.items():
+                                span.set_attribute(f"safety.toxicity.{category}", float(score))
                         
                         # Keep old names for backward compatibility
                         span.set_attribute("safety.pii_detected", pii_detected)
                         span.set_attribute("safety.prompt_injection_detected", injection_detected)
 
                     # Track structured output if schema provided
-                    if expected_schema and isinstance(response, str):
-                        parsed = parse_and_validate_json(span, response, expected_schema)
+                    if expected_schema and response_text and isinstance(response_text, str):
+                        parsed = parse_and_validate_json(span, response_text, expected_schema)
                         if parsed:
                             span.set_attribute("llm.structured_output.success", True)
                         else:
@@ -347,7 +360,9 @@ def instrument_llm(
                             elif not isinstance(rag_context, str):
                                 rag_context = str(rag_context)
                         
-                        if rag_context and response_text and isinstance(response_text, str):
+                        # Always create hallucination evaluation span (matching D:/Phoenix/anomaly_detection pattern)
+                        # If context is available, run full evaluation; otherwise mark as "no context"
+                        if response_text and isinstance(response_text, str):
                             # Create separate child span for hallucination evaluation
                             eval_tracer = get_tracer()
                             with eval_tracer.start_as_current_span(
@@ -359,13 +374,23 @@ def instrument_llm(
                                 eval_span.set_attribute("evaluation.type", "hallucination")
                                 
                                 # Set input and output values for Phoenix dashboard
-                                eval_span.set_attribute("input.value", response_text[:1000])
+                                # Include user query in input for better context
+                                if user_query:
+                                    eval_input = f"Query: {user_query[:500]}\n\nResponse: {response_text[:500]}"
+                                else:
+                                    eval_input = response_text[:1000]
+                                eval_span.set_attribute("input.value", eval_input)
                                 eval_span.set_attribute("output.value", response_text[:1000])
                                 
-                                # Run hallucination detection
+                                # Always run hallucination detection (with or without context)
+                                # If context available: compares against context
+                                # If no context: uses LLM judge to evaluate internal consistency and plausibility
+                                # Pass user_query for better evaluation when no context is available
                                 hall_result = judge_hallucination(
-                                    context=rag_context,
-                                    answer=response_text
+                                    context=rag_context,  # Can be None
+                                    answer=response_text,
+                                    user_query=user_query,  # Pass user query for better evaluation
+                                    use_llm=True  # Use LLM judge for evaluation
                                 )
                                 
                                 # Set evaluation attributes on the evaluation span
@@ -389,9 +414,6 @@ def instrument_llm(
                                 span.set_attribute("evaluator.hallucination.explanation", reason)
                                 
                                 eval_span.set_status(trace.Status(trace.StatusCode.OK))
-                        elif not rag_context:
-                            # Log why context wasn't found for debugging
-                            logger.debug(f"Hallucination detection skipped: no context found. args={len(args)}, kwargs keys={list(kwargs.keys())}")
                     except Exception as e:
                         logger.warning(f"Hallucination detection failed: {e}", exc_info=True)
                     

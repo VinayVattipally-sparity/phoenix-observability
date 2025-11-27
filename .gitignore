@@ -40,4 +40,5 @@ Thumbs.db
 # Project specific
 instructions.md
 dist/
-
+*.docx
+summary.md
