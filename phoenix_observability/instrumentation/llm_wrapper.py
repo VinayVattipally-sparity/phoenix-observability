@@ -61,6 +61,30 @@ def instrument_llm(
                 # Set OpenInference span kind
                 span.set_attribute("openinference.span.kind", "LLM")
                 
+                # Add project_name and service_name from resource or environment
+                # These help organize traces in Phoenix dashboard
+                import os
+                project_name = os.getenv("PHOENIX_PROJECT_NAME") or config.default_service_name
+                service_name = config.default_service_name
+                
+                # Try to get from resource attributes if available
+                try:
+                    from opentelemetry import trace as otel_trace
+                    tracer_provider = otel_trace.get_tracer_provider()
+                    if hasattr(tracer_provider, 'resource') and tracer_provider.resource:
+                        resource_attrs = dict(tracer_provider.resource.attributes)
+                        project_name = resource_attrs.get("project.name") or resource_attrs.get("project.id") or project_name
+                        service_name = resource_attrs.get("service.name") or service_name
+                except:
+                    pass
+                
+                # Set project and service attributes on span
+                if project_name:
+                    span.set_attribute("project.name", project_name)
+                    span.set_attribute("project.id", project_name)
+                if service_name:
+                    span.set_attribute("service.name", service_name)
+                
                 # Track API hit (indicates an API call was made)
                 span.set_attribute("llm.api_hit", True)
                 span.set_attribute("api.hit", True)  # Also set flat for dashboard
@@ -145,8 +169,38 @@ def instrument_llm(
                     response_text = None
                     usage_data = None
                     
+                    # Handle Google Gemini GenerateContentResponse object
+                    # Check for Gemini response format (has .text property and .candidates attribute)
+                    if hasattr(result, 'text') and hasattr(result, 'candidates'):
+                        # Gemini GenerateContentResponse has .text property
+                        try:
+                            # Get text directly from Gemini response
+                            response_text = result.text
+                            
+                            # Extract usage metadata from Gemini response
+                            if hasattr(result, 'usage_metadata'):
+                                um = result.usage_metadata
+                                if um:
+                                    usage_data = {
+                                        "prompt_tokens": getattr(um, 'prompt_token_count', 0),
+                                        "completion_tokens": getattr(um, 'candidates_token_count', 0),
+                                        "total_tokens": getattr(um, 'total_token_count', None)
+                                    }
+                            
+                            # Extract model name from Gemini response
+                            if hasattr(result, 'model') and result.model:
+                                actual_model_name = result.model
+                            elif hasattr(result, 'model_name') and result.model_name:
+                                actual_model_name = result.model_name
+                            
+                            span.set_attribute("llm.model_name", actual_model_name)
+                            span.set_attribute("llm.model", actual_model_name)
+                            span.set_attribute("llm.vendor", "google")
+                        except Exception as e:
+                            logger.debug(f"Error extracting Gemini response: {e}")
+                    
                     # Handle OpenAI ChatCompletion object
-                    if hasattr(result, 'model'):
+                    elif hasattr(result, 'model'):
                         actual_model_name = result.model
                         span.set_attribute("llm.model_name", actual_model_name)
                         span.set_attribute("llm.model", actual_model_name)

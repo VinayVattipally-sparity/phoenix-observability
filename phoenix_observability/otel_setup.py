@@ -204,14 +204,6 @@ def init_observability(
         # HTTP exporter doesn't support 'insecure' parameter
         # HttpExporter automatically reads OTEL_EXPORTER_OTLP_HEADERS from environment if set
         # rag_mini_app sets OTEL_EXPORTER_OTLP_HEADERS before calling init_observability()
-        # Set authentication headers in environment if available (with fallback to defaults)
-        headers = config.get_otlp_headers()
-        if headers:
-            # Convert headers dict to OTEL_EXPORTER_OTLP_HEADERS format: "key1=value1,key2=value2"
-            headers_str = ",".join([f"{k}={v}" for k, v in headers.items()])
-            os.environ["OTEL_EXPORTER_OTLP_HEADERS"] = headers_str
-            logger.info(f"Set OTEL_EXPORTER_OTLP_HEADERS with authentication headers: {list(headers.keys())}")
-        
         exporter = HttpExporter(
             endpoint=otlp_endpoint,
         )
