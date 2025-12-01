@@ -242,8 +242,14 @@ def init_observability(
     if use_http:
         # Use HTTP exporter for HTTP/HTTPS endpoints
         # HTTP exporter doesn't support 'insecure' parameter
+        # Get authentication headers with fallback to defaults
+        headers = config.get_otlp_headers()
+        if headers:
+            logger.info(f"Using HTTP exporter with authentication headers: {list(headers.keys())}")
+        
         exporter = HttpExporter(
             endpoint=otlp_endpoint,
+            headers=headers if headers else None,
         )
         logger.info(f"Using HTTP exporter for endpoint: {otlp_endpoint}")
     else:
