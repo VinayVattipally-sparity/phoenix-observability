@@ -137,90 +137,31 @@ def init_observability(
     if environment is None:
         environment = config.environment
     
-    # Try to use Phoenix's own registration method if available (handles project organization better)
-    try:
-        from phoenix.otel import register as phoenix_register  # type: ignore
-        
-        # Get project name from parameter or environment variable (matching Phoenix folder pattern)
-        phoenix_project = project_name or os.getenv("PHOENIX_PROJECT_NAME", service_name)
-        
-        # Ensure endpoint format is correct (add /v1/traces if not present)
-        otlp_endpoint = phoenix_endpoint
-        if otlp_endpoint and not otlp_endpoint.endswith('/v1/traces'):
-            otlp_endpoint = otlp_endpoint.rstrip('/') + '/v1/traces'
-        
-        logger.info(f"Using Phoenix's register() method with project_name='{phoenix_project}'")
-        
-        # Use Phoenix's register function which handles project_name properly
-        # Matching the pattern from D:/Phoenix/anomaly_detection/tracing.py
-        tracer_provider = phoenix_register(
-            endpoint=otlp_endpoint,
-            project_name=phoenix_project,
-            protocol="http/protobuf",  # Use HTTP/protobuf for better compatibility
-            batch=True,
-            verbose=True
-        )
-        
-        log_msg = f"Phoenix OpenTelemetry initialized for service '{service_name}'"
-        if phoenix_project:
-            log_msg += f" in project '{phoenix_project}'"
-        log_msg += f" with Phoenix endpoint: {otlp_endpoint}"
-        logger.info(log_msg)
-        return
-        
-    except ImportError:
-        # Phoenix's register not available, use pure OpenTelemetry
-        logger.warning(
-            "Phoenix's register() not available. "
-            "For proper project organization, install: pip install arize-phoenix"
-        )
-        logger.info("Falling back to pure OpenTelemetry setup")
-        pass
-    
-    # Fallback to pure OpenTelemetry setup
-    # IMPORTANT: For Phoenix to organize traces by project with pure OpenTelemetry,
-    # we need to set PHOENIX_PROJECT_NAME before tracer provider creation
-    # AND use service.name that matches the project name
-    if project_name:
-        # Set environment variable (Phoenix reads this)
-        os.environ["PHOENIX_PROJECT_NAME"] = project_name
-        # Also set PHOENIX_COLLECTOR_ENDPOINT if not already set
-        if not os.getenv("PHOENIX_COLLECTOR_ENDPOINT"):
-            os.environ["PHOENIX_COLLECTOR_ENDPOINT"] = phoenix_endpoint
-        logger.info(f"Set PHOENIX_PROJECT_NAME={project_name} for project organization")
+    # Use pure OpenTelemetry setup (matching reference implementation in D:\phoenix_package exactly)
+    # The reference does NOT use Phoenix register() - it uses pure OpenTelemetry with HttpExporter
+    # This matches rag_mini_app which also uses pure OpenTelemetry
+    # NOTE: For project organization, we rely on resource attributes and span attributes
+    logger.info("Using pure OpenTelemetry setup (matching reference implementation)")
 
-    # Build resource attributes
-    # NOTE: When using pure OpenTelemetry, Phoenix may use service.name as project identifier
-    # So we set service.name to project_name if provided, otherwise use service_name
+    # Build resource attributes (matching reference exactly)
+    # IMPORTANT: service.name must be set correctly for Phoenix to recognize the service
     resource_attributes = {
-        "service.name": project_name if project_name else service_name,
+        "service.name": service_name,
         "service.version": "0.1.0",
         "deployment.environment": environment,
     }
     
+    # Ensure service.name is not overridden (Phoenix may set it to "unknown_service" if not careful)
+    if not service_name or service_name == "unknown_service":
+        logger.warning(f"Service name is '{service_name}', this may cause issues with Phoenix project organization")
+    
     # Add project name if provided (Phoenix uses this to organize traces)
+    # Phoenix Cloud may read from multiple attribute names, so set all of them
     if project_name:
-        # Set as resource attributes for OpenTelemetry
         resource_attributes["project.name"] = project_name
-        resource_attributes["project.id"] = project_name
-        # Phoenix-specific attributes (Phoenix may read these)
-        resource_attributes["phoenix.project.name"] = project_name
-        resource_attributes["phoenix.project.id"] = project_name
-        # Also keep original service name for reference
-        resource_attributes["service.instance.id"] = service_name
-        
-        # Create the project in Phoenix if it doesn't exist
-        # Note: Projects are also created automatically when traces with project.name are sent
-        project_created = create_phoenix_project(
-            project_name=project_name,
-            phoenix_endpoint=phoenix_endpoint,
-            description=f"Project for {service_name} service"
-        )
-        if not project_created:
-            logger.info(
-                f"Project '{project_name}' will be created automatically when traces are sent. "
-                f"To create it explicitly, install: pip install arize-phoenix-client"
-            )
+        resource_attributes["project.id"] = project_name  # Also set as ID for Phoenix project grouping
+        resource_attributes["openinference.project.name"] = project_name  # Phoenix may also read this
+        resource_attributes["openinference.project.id"] = project_name
 
     # Create resource with service metadata
     resource = Resource.create(resource_attributes)
@@ -228,28 +169,51 @@ def init_observability(
     # Create tracer provider
     tracer_provider = TracerProvider(resource=resource)
 
-    # Configure OTLP exporter
-    otlp_endpoint = config.otlp_endpoint
-    if phoenix_endpoint and not config.otlp_endpoint:
-        # Construct OTLP endpoint from Phoenix endpoint
-        otlp_endpoint = f"{phoenix_endpoint}/v1/traces"
+    # Configure OTLP exporter (matching reference implementation exactly)
+    # IMPORTANT: For fallback, use OTEL_EXPORTER_OTLP_ENDPOINT if available (it has the full path)
+    # Otherwise construct from config.otlp_endpoint or phoenix_endpoint
+    # HttpExporter requires full path with /v1/traces
+    otlp_endpoint = None
+    
+    # Check if OTEL_EXPORTER_OTLP_ENDPOINT was restored (from failed register() attempt)
+    if os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"):
+        otlp_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+        logger.info(f"Using OTEL_EXPORTER_OTLP_ENDPOINT from environment: {otlp_endpoint}")
+    elif config.otlp_endpoint:
+        otlp_endpoint = config.otlp_endpoint
+    elif phoenix_endpoint:
+        # Construct OTLP endpoint from Phoenix endpoint (matching reference line 69)
+        otlp_endpoint = f"{phoenix_endpoint.rstrip('/')}/v1/traces"
+    
+    # Always ensure /v1/traces is present (HttpExporter requires full path)
+    if otlp_endpoint and not otlp_endpoint.endswith('/v1/traces'):
+        otlp_endpoint = f"{otlp_endpoint.rstrip('/')}/v1/traces"
+        logger.info(f"Added /v1/traces to endpoint: {otlp_endpoint}")
+    
+    if not otlp_endpoint:
+        logger.error("Could not determine OTLP endpoint. Please set PHOENIX_ENDPOINT or OTLP_ENDPOINT")
+        return
 
-    # Determine which exporter to use based on endpoint protocol
+    # Determine which exporter to use based on endpoint protocol (matching reference exactly)
     # Use HTTP exporter if endpoint starts with http:// or https://
     # Otherwise default to gRPC
     use_http = otlp_endpoint.startswith("http://") or otlp_endpoint.startswith("https://")
     
     if use_http:
-        # Use HTTP exporter for HTTP/HTTPS endpoints
+        # Use HTTP exporter for HTTP/HTTPS endpoints (matching reference lines 76-82)
         # HTTP exporter doesn't support 'insecure' parameter
-        # Get authentication headers with fallback to defaults
+        # HttpExporter automatically reads OTEL_EXPORTER_OTLP_HEADERS from environment if set
+        # rag_mini_app sets OTEL_EXPORTER_OTLP_HEADERS before calling init_observability()
+        # Set authentication headers in environment if available (with fallback to defaults)
         headers = config.get_otlp_headers()
         if headers:
-            logger.info(f"Using HTTP exporter with authentication headers: {list(headers.keys())}")
+            # Convert headers dict to OTEL_EXPORTER_OTLP_HEADERS format: "key1=value1,key2=value2"
+            headers_str = ",".join([f"{k}={v}" for k, v in headers.items()])
+            os.environ["OTEL_EXPORTER_OTLP_HEADERS"] = headers_str
+            logger.info(f"Set OTEL_EXPORTER_OTLP_HEADERS with authentication headers: {list(headers.keys())}")
         
         exporter = HttpExporter(
             endpoint=otlp_endpoint,
-            headers=headers if headers else None,
         )
         logger.info(f"Using HTTP exporter for endpoint: {otlp_endpoint}")
     else:
