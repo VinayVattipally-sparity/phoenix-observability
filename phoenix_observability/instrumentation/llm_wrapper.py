@@ -33,6 +33,7 @@ def instrument_llm(
     track_cost: Optional[bool] = None,
     track_pii: Optional[bool] = None,
     expected_schema: Optional[Dict[str, Any]] = None,
+    service_name: Optional[str] = None,
 ):
     """
     Decorator to instrument LLM calls.
@@ -42,6 +43,7 @@ def instrument_llm(
         track_cost: Whether to track cost (defaults to config)
         track_pii: Whether to track PII and safety flags (defaults to config)
         expected_schema: Optional expected JSON schema for structured output
+        service_name: Optional service name for this LLM call (overrides resource-level service.name)
 
     Returns:
         Decorated function
@@ -65,25 +67,32 @@ def instrument_llm(
                 # These help organize traces in Phoenix dashboard
                 import os
                 project_name = os.getenv("PHOENIX_PROJECT_NAME") or config.default_service_name
-                service_name = config.default_service_name
+                # Use service_name from decorator parameter if provided, otherwise get from resource
+                final_service_name = service_name  # Use decorator parameter if provided
                 
-                # Try to get from resource attributes if available
+                # Try to get from resource attributes if available (only if not provided in decorator)
                 try:
                     from opentelemetry import trace as otel_trace
                     tracer_provider = otel_trace.get_tracer_provider()
                     if hasattr(tracer_provider, 'resource') and tracer_provider.resource:
                         resource_attrs = dict(tracer_provider.resource.attributes)
                         project_name = resource_attrs.get("project.name") or resource_attrs.get("project.id") or project_name
-                        service_name = resource_attrs.get("service.name") or service_name
+                        # Only use resource service.name if not provided in decorator parameter
+                        if not final_service_name:
+                            final_service_name = resource_attrs.get("service.name")
                 except:
                     pass
+                
+                # Fallback to config default if still not set
+                if not final_service_name:
+                    final_service_name = config.default_service_name
                 
                 # Set project and service attributes on span
                 if project_name:
                     span.set_attribute("project.name", project_name)
                     span.set_attribute("project.id", project_name)
-                if service_name:
-                    span.set_attribute("service.name", service_name)
+                if final_service_name:
+                    span.set_attribute("service.name", final_service_name)
                 
                 # Track API hit (indicates an API call was made)
                 span.set_attribute("llm.api_hit", True)

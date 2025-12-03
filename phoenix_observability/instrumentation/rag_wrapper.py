@@ -21,6 +21,7 @@ def instrument_retriever(
     retriever_name: Optional[str] = None,
     log_documents: bool = True,
     log_metadata: bool = True,
+    service_name: Optional[str] = None,
 ):
     """
     Decorator to instrument RAG retrieval operations.
@@ -29,6 +30,7 @@ def instrument_retriever(
         retriever_name: Name of the retriever (defaults to function name)
         log_documents: Whether to log document contents
         log_metadata: Whether to log metadata
+        service_name: Optional service name for this retriever (overrides resource-level service.name)
 
     Returns:
         Decorated function
@@ -43,6 +45,38 @@ def instrument_retriever(
             with tracer.start_as_current_span(f"rag.retrieve.{name}") as span:
                 # Set OpenInference span kind for retrievers
                 span.set_attribute("openinference.span.kind", "RETRIEVER")
+                
+                # Add project_name and service_name from resource or environment
+                from phoenix_observability.config import get_config
+                config = get_config()
+                import os
+                project_name = os.getenv("PHOENIX_PROJECT_NAME") or config.default_service_name
+                # Use service_name from decorator parameter if provided, otherwise get from resource
+                final_service_name = service_name  # Use decorator parameter if provided
+                
+                # Try to get from resource attributes if available (only if not provided in decorator)
+                try:
+                    from opentelemetry import trace as otel_trace
+                    tracer_provider = otel_trace.get_tracer_provider()
+                    if hasattr(tracer_provider, 'resource') and tracer_provider.resource:
+                        resource_attrs = dict(tracer_provider.resource.attributes)
+                        project_name = resource_attrs.get("project.name") or resource_attrs.get("project.id") or project_name
+                        # Only use resource service.name if not provided in decorator parameter
+                        if not final_service_name:
+                            final_service_name = resource_attrs.get("service.name")
+                except:
+                    pass
+                
+                # Fallback to config default if still not set
+                if not final_service_name:
+                    final_service_name = config.default_service_name
+                
+                # Set project and service attributes on span
+                if project_name:
+                    span.set_attribute("project.name", project_name)
+                    span.set_attribute("project.id", project_name)
+                if final_service_name:
+                    span.set_attribute("service.name", final_service_name)
                 
                 span.set_attribute("rag.retriever", name)
                 span.set_attribute("rag.function", func.__name__)
