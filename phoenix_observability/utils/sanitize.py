@@ -5,7 +5,7 @@ Prevents huge prompts/responses from being logged to Phoenix.
 """
 
 import logging
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from phoenix_observability.config import get_config
 
@@ -19,14 +19,22 @@ def sanitize_prompt(prompt: Any, max_length: Optional[int] = None) -> str:
     Sanitize and truncate prompt if too long.
 
     Args:
-        prompt: Prompt to sanitize (can be str, list, dict, etc.)
-        max_length: Maximum length (defaults to config value)
+        prompt: Prompt to sanitize (can be str, list, dict, etc.). If None, returns empty string.
+        max_length: Maximum length (defaults to config value). Must be positive if provided.
 
     Returns:
         Sanitized prompt string
     """
+    # Handle None input
+    if prompt is None:
+        return ""
+    
     config = get_config()
     max_len = max_length or config.max_prompt_length
+    
+    # Validate max_length if provided
+    if max_length is not None and max_length <= 0:
+        raise ValueError(f"max_length must be positive, got {max_length}")
 
     # Convert to string
     if isinstance(prompt, str):
@@ -49,14 +57,22 @@ def sanitize_response(response: Any, max_length: Optional[int] = None) -> str:
     Sanitize and truncate response if too long.
 
     Args:
-        response: Response to sanitize
-        max_length: Maximum length (defaults to config value)
+        response: Response to sanitize. If None, returns empty string.
+        max_length: Maximum length (defaults to config value). Must be positive if provided.
 
     Returns:
         Sanitized response string
     """
+    # Handle None input
+    if response is None:
+        return ""
+    
     config = get_config()
     max_len = max_length or config.max_response_length
+    
+    # Validate max_length if provided
+    if max_length is not None and max_length <= 0:
+        raise ValueError(f"max_length must be positive, got {max_length}")
 
     # Convert to string
     if isinstance(response, str):
@@ -74,28 +90,44 @@ def sanitize_response(response: Any, max_length: Optional[int] = None) -> str:
     return response_str
 
 
-def sanitize_dict(data: dict, max_value_length: int = 1000) -> dict:
+def sanitize_dict(
+    data: Dict[str, Any], 
+    max_value_length: Optional[int] = None
+) -> Dict[str, Any]:
     """
     Sanitize dictionary values by truncating long strings.
 
     Args:
-        data: Dictionary to sanitize
-        max_value_length: Maximum length for string values
+        data: Dictionary to sanitize. Must be a dict, not None.
+        max_value_length: Maximum length for string values. Must be positive.
 
     Returns:
         Sanitized dictionary
+        
+    Raises:
+        TypeError: If data is not a dict
+        ValueError: If max_value_length is not positive
     """
+    if not isinstance(data, dict):
+        raise TypeError(f"data must be a dict, got {type(data).__name__}")
+    
+    config = get_config()
+    max_len = max_value_length or config.max_value_length
+    
+    if max_len <= 0:
+        raise ValueError(f"max_value_length must be positive, got {max_len}")
+    
     sanitized = {}
     for key, value in data.items():
-        if isinstance(value, str) and len(value) > max_value_length:
-            sanitized[key] = value[:max_value_length] + TRUNCATION_MESSAGE
+        if isinstance(value, str) and len(value) > max_len:
+            sanitized[key] = value[:max_len] + TRUNCATION_MESSAGE
         elif isinstance(value, dict):
-            sanitized[key] = sanitize_dict(value, max_value_length)
+            sanitized[key] = sanitize_dict(value, max_len)
         elif isinstance(value, list):
             sanitized[key] = [
                 (
-                    item[:max_value_length] + TRUNCATION_MESSAGE
-                    if isinstance(item, str) and len(item) > max_value_length
+                    item[:max_len] + TRUNCATION_MESSAGE
+                    if isinstance(item, str) and len(item) > max_len
                     else item
                 )
                 for item in value

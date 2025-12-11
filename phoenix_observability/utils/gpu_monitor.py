@@ -68,13 +68,15 @@ class GPUMonitor:
                 temperature = pynvml.nvmlDeviceGetTemperature(
                     handle, pynvml.NVML_TEMPERATURE_GPU
                 )
-            except:
+            except Exception as e:
+                logger.warning(f"Failed to get GPU temperature for device {device_id}: {e}")
                 temperature = None
 
             # Power
             try:
                 power = pynvml.nvmlDeviceGetPowerUsage(handle) / 1000.0  # Convert to watts
-            except:
+            except Exception as e:
+                logger.warning(f"Failed to get GPU power usage for device {device_id}: {e}")
                 power = None
 
             return {
@@ -114,7 +116,8 @@ class GPUMonitor:
         if self.initialized and GPU_AVAILABLE:
             try:
                 pynvml.nvmlShutdown()
-            except:
+            except Exception as e:
+                logger.warning(f"Failed to shutdown GPU monitoring: {e}")
                 pass
 
 

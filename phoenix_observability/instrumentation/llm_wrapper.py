@@ -21,8 +21,23 @@ from phoenix_observability.utils.hallucination import judge_hallucination
 from phoenix_observability.utils.accuracy import evaluate_accuracy
 from phoenix_observability.utils.system_metrics import attach_system_metrics_to_span
 from phoenix_observability.instrumentation.error_handler import handle_error
+from phoenix_observability.instrumentation.llm_helpers import (
+    extract_generation_config,
+    extract_prompt_from_args,
+    extract_rag_context,
+    extract_response_data,
+    set_span_metadata,
+)
+from phoenix_observability.instrumentation.span_helpers import (
+    extract_project_and_service_name,
+)
 from phoenix_observability.instrumentation.structured_output import (
     parse_and_validate_json,
+)
+from phoenix_observability.utils.metrics import (
+    record_span_created,
+    record_span_latency,
+    record_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,19 +49,62 @@ def instrument_llm(
     track_pii: Optional[bool] = None,
     expected_schema: Optional[Dict[str, Any]] = None,
     service_name: Optional[str] = None,
-):
+) -> Callable[[Callable], Callable]:
     """
-    Decorator to instrument LLM calls.
+    Decorator to instrument LLM calls with automatic observability.
+
+    This decorator automatically creates OpenTelemetry spans for LLM function calls,
+    tracking prompts, responses, latency, cost, and optional evaluations (PII detection,
+    hallucination detection, accuracy evaluation).
 
     Args:
-        model_name: Name of the model (if not provided, will try to extract from function)
-        track_cost: Whether to track cost (defaults to config)
-        track_pii: Whether to track PII and safety flags (defaults to config)
-        expected_schema: Optional expected JSON schema for structured output
-        service_name: Optional service name for this LLM call (overrides resource-level service.name)
+        model_name: Name of the LLM model (e.g., "gpt-4", "claude-3-5-sonnet").
+            If not provided, the decorator will attempt to extract the model name
+            from the function's return value or arguments. Supported formats include
+            OpenAI, Anthropic, and Gemini response objects.
+        track_cost: Whether to automatically calculate and track the cost of the LLM call.
+            If None, uses the value from config.enable_cost_tracking. Cost is calculated
+            based on input/output tokens and model pricing. Defaults to None (uses config).
+        track_pii: Whether to run PII detection and safety analysis on the prompt and response.
+            If None, uses the value from config.enable_pii_tracking. When enabled, detects
+            personally identifiable information and calculates toxicity scores. Defaults to None (uses config).
+        expected_schema: Optional dictionary defining the expected JSON schema for structured output.
+            Keys should be field names and values should be Python types (e.g., {"name": str, "age": int}).
+            The decorator will validate the response against this schema and log violations.
+            Can also be a Pydantic BaseModel class for more complex validation.
+        service_name: Optional service name for this specific LLM call. If provided, overrides
+            the resource-level service.name attribute for this span. Useful for distinguishing
+            different LLM services within the same application.
 
     Returns:
-        Decorated function
+        A decorator function that wraps the original function with observability instrumentation.
+        The wrapped function maintains the same signature and return value as the original.
+
+    Example:
+        Basic usage::
+
+            @instrument_llm
+            def chat(prompt: str):
+                client = OpenAI()
+                response = client.chat.completions.create(
+                    model="gpt-4",
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                return response.choices[0].message.content
+
+        With model name and cost tracking::
+
+            @instrument_llm(model_name="gpt-4", track_cost=True)
+            def expensive_call(prompt: str):
+                # Cost will be automatically calculated
+                return llm_call(prompt)
+
+        With structured output validation::
+
+            @instrument_llm(expected_schema={"name": str, "age": int})
+            def extract_user_info(text: str):
+                # Response will be validated against schema
+                return llm_call(text)
     """
     config = get_config()
 
@@ -60,108 +118,36 @@ def instrument_llm(
             with tracer.start_as_current_span(
                 f"llm.call.{func.__name__}"
             ) as span:
-                # Set OpenInference span kind
-                span.set_attribute("openinference.span.kind", "LLM")
+                # Record span creation metric
+                record_span_created("llm")
                 
-                # Add project_name and service_name from resource or environment
-                # These help organize traces in Phoenix dashboard
-                import os
-                project_name = os.getenv("PHOENIX_PROJECT_NAME") or config.default_service_name
-                # Use service_name from decorator parameter if provided, otherwise get from resource
-                final_service_name = service_name  # Use decorator parameter if provided
+                # Extract project and service names
+                project_name, final_service_name = extract_project_and_service_name(service_name)
                 
-                # Try to get from resource attributes if available (only if not provided in decorator)
-                try:
-                    from opentelemetry import trace as otel_trace
-                    tracer_provider = otel_trace.get_tracer_provider()
-                    if hasattr(tracer_provider, 'resource') and tracer_provider.resource:
-                        resource_attrs = dict(tracer_provider.resource.attributes)
-                        project_name = resource_attrs.get("project.name") or resource_attrs.get("project.id") or project_name
-                        # Only use resource service.name if not provided in decorator parameter
-                        if not final_service_name:
-                            final_service_name = resource_attrs.get("service.name")
-                except:
-                    pass
-                
-                # Fallback to config default if still not set
-                if not final_service_name:
-                    final_service_name = config.default_service_name
-                
-                # Set project and service attributes on span
-                if project_name:
-                    span.set_attribute("project.name", project_name)
-                    span.set_attribute("project.id", project_name)
-                if final_service_name:
-                    span.set_attribute("service.name", final_service_name)
-                
-                # Track API hit (indicates an API call was made)
-                span.set_attribute("llm.api_hit", True)
-                span.set_attribute("api.hit", True)  # Also set flat for dashboard
-                
-                # Basic LLM attributes
-                span.set_attribute("llm.model_name", func_model_name)
-                span.set_attribute("llm.model", func_model_name)  # Keep for backward compatibility
-                span.set_attribute("llm.function", func.__name__)
-                
-                # Extract vendor from model name
-                vendor = "openai"  # default
-                model_lower = func_model_name.lower()
-                if "gpt" in model_lower or "openai" in model_lower:
-                    vendor = "openai"
-                elif "claude" in model_lower or "anthropic" in model_lower:
-                    vendor = "anthropic"
-                elif "gemini" in model_lower or "google" in model_lower:
-                    vendor = "google"
-                elif "llama" in model_lower:
-                    vendor = "meta"
-                span.set_attribute("llm.vendor", vendor)
+                # Set span metadata
+                set_span_metadata(span, project_name, final_service_name, func_model_name, func.__name__)
 
                 timer = LatencyTimer()
                 timer.start()
 
                 try:
-                    # Extract prompt from args/kwargs (common patterns)
-                    prompt = None
-                    user_query = None
-                    if args and len(args) > 0:
-                        prompt = args[0]
-                        user_query = args[0] if isinstance(args[0], str) else None
-                    elif "prompt" in kwargs:
-                        prompt = kwargs["prompt"]
-                        user_query = kwargs["prompt"] if isinstance(kwargs["prompt"], str) else None
-                    elif "messages" in kwargs:
-                        messages = kwargs["messages"]
-                        prompt = messages
-                        # Extract user query from messages
-                        if isinstance(messages, list) and messages:
-                            last_msg = messages[-1]
-                            if isinstance(last_msg, dict) and last_msg.get("role") == "user":
-                                user_query = last_msg.get("content", "")
-                    elif "query" in kwargs:
-                        user_query = kwargs["query"]
-                        prompt = kwargs["query"]
+                    # Extract prompt and user query
+                    prompt, user_query = extract_prompt_from_args(args, kwargs)
 
                     # Log prompt (sanitized)
                     if prompt:
                         sanitized_prompt = sanitize_prompt(prompt)
                         span.set_attribute("llm.prompt", sanitized_prompt)
-                        # Set input.value for OpenInference
-                        span.set_attribute("input.value", sanitized_prompt[:1000])  # Truncate for display
+                        span.set_attribute("input.value", sanitized_prompt[:1000])
                     
                     # Log user query separately
                     if user_query:
                         span.set_attribute("llm.user_query", user_query)
                     
-                    # Extract generation config if available
-                    if "temperature" in kwargs:
-                        span.set_attribute("llm.generation_config.temperature", kwargs["temperature"])
-                    if "max_tokens" in kwargs or "max_output_tokens" in kwargs:
-                        max_tokens = kwargs.get("max_tokens") or kwargs.get("max_output_tokens")
-                        span.set_attribute("llm.generation_config.max_output_tokens", max_tokens)
-                    
-                    # Extract operation name if available
-                    if "operation" in kwargs:
-                        span.set_attribute("llm.operation", kwargs["operation"])
+                    # Extract and set generation config
+                    gen_config = extract_generation_config(kwargs)
+                    for key, value in gen_config.items():
+                        span.set_attribute(key, value)
 
                     # Call the LLM function
                     result = func(*args, **kwargs)
@@ -172,92 +158,21 @@ def instrument_llm(
                     span.set_attribute("llm.latency_ms", latency_ms)
                     # Keep old name for backward compatibility
                     span.set_attribute("llm.latency_seconds", latency)
+                    
+                    # Record latency metric
+                    record_span_latency(latency_ms, "llm")
 
-                    # Extract actual model name from response
-                    actual_model_name = func_model_name
-                    response_text = None
-                    usage_data = None
+                    # Extract response data
+                    response_text, usage_data, actual_model_name = extract_response_data(result, func_model_name)
                     
-                    # Handle Google Gemini GenerateContentResponse object
-                    # Check for Gemini response format (has .text property and .candidates attribute)
-                    if hasattr(result, 'text') and hasattr(result, 'candidates'):
-                        # Gemini GenerateContentResponse has .text property
-                        try:
-                            # Get text directly from Gemini response
-                            response_text = result.text
-                            
-                            # Extract usage metadata from Gemini response
-                            if hasattr(result, 'usage_metadata'):
-                                um = result.usage_metadata
-                                if um:
-                                    usage_data = {
-                                        "prompt_tokens": getattr(um, 'prompt_token_count', 0),
-                                        "completion_tokens": getattr(um, 'candidates_token_count', 0),
-                                        "total_tokens": getattr(um, 'total_token_count', None)
-                                    }
-                            
-                            # Extract model name from Gemini response
-                            if hasattr(result, 'model') and result.model:
-                                actual_model_name = result.model
-                            elif hasattr(result, 'model_name') and result.model_name:
-                                actual_model_name = result.model_name
-                            
-                            span.set_attribute("llm.model_name", actual_model_name)
-                            span.set_attribute("llm.model", actual_model_name)
-                            span.set_attribute("llm.vendor", "google")
-                        except Exception as e:
-                            logger.debug(f"Error extracting Gemini response: {e}")
-                    
-                    # Handle OpenAI ChatCompletion object
-                    elif hasattr(result, 'model'):
-                        actual_model_name = result.model
+                    # Update span with actual model name if different
+                    if actual_model_name != func_model_name:
                         span.set_attribute("llm.model_name", actual_model_name)
                         span.set_attribute("llm.model", actual_model_name)
                         # Update vendor based on actual model
-                        model_lower = actual_model_name.lower()
-                        if "gpt" in model_lower or "openai" in model_lower:
-                            vendor = "openai"
-                        elif "claude" in model_lower or "anthropic" in model_lower:
-                            vendor = "anthropic"
-                        elif "gemini" in model_lower or "google" in model_lower:
-                            vendor = "google"
-                        elif "llama" in model_lower:
-                            vendor = "meta"
+                        from phoenix_observability.instrumentation.llm_helpers import _extract_vendor_from_model
+                        vendor = _extract_vendor_from_model(actual_model_name)
                         span.set_attribute("llm.vendor", vendor)
-                    
-                    # Extract response text
-                    if hasattr(result, 'choices') and result.choices:
-                        # OpenAI ChatCompletion format
-                        response_text = result.choices[0].message.content
-                        if hasattr(result, 'usage'):
-                            usage_data = {
-                                "prompt_tokens": result.usage.prompt_tokens,
-                                "completion_tokens": result.usage.completion_tokens,
-                                "total_tokens": result.usage.total_tokens
-                            }
-                    elif isinstance(result, dict):
-                        # Dict format
-                        if "choices" in result:
-                            if result["choices"]:
-                                response_text = result["choices"][0].get("message", {}).get("content", "")
-                        elif "content" in result:
-                            response_text = result["content"]
-                        elif "text" in result:
-                            response_text = result["text"]
-                        elif "output" in result:
-                            response_text = result["output"]
-                        
-                        # Extract model from dict if available
-                        if "model" in result:
-                            actual_model_name = result["model"]
-                            span.set_attribute("llm.model_name", actual_model_name)
-                            span.set_attribute("llm.model", actual_model_name)
-                        
-                        # Extract usage from dict
-                        if "usage" in result:
-                            usage_data = result["usage"]
-                    elif isinstance(result, str):
-                        response_text = result
 
                     # Log response (sanitized)
                     if response_text:
@@ -295,10 +210,68 @@ def instrument_llm(
                     should_track_pii = (
                         track_pii if track_pii is not None else config.enable_pii_tracking
                     )
+                    
+                    # Check prompt injection on the INPUT prompt (not response)
+                    prompt_injection_result = {}
+                    prompt_injection_detected = False
+                    if should_track_pii and sanitized_prompt and isinstance(sanitized_prompt, str):
+                        from phoenix_observability.utils.pii_safety import detect_prompt_injection
+                        # Enable warnings by default (can be controlled via config)
+                        enable_warnings = getattr(config, 'enable_jailbreak_warnings', True)
+                        prompt_injection_result = detect_prompt_injection(sanitized_prompt, enable_warnings=enable_warnings)
+                        
+                        # Set prompt injection attributes
+                        prompt_injection_detected = prompt_injection_result.get("prompt_injection_detected", False)
+                        span.set_attribute("llm.prompt_injection.detected", prompt_injection_detected)
+                        span.set_attribute("prompt_injection.detected", prompt_injection_detected)
+                        
+                        # Always set prompt injection attributes (even if not detected)
+                        span.set_attribute("llm.prompt_injection.confidence", prompt_injection_result.get("confidence", 0.0))
+                        span.set_attribute("llm.prompt_injection.risk_level", prompt_injection_result.get("risk_level", "low"))
+                        
+                        # Set jailbreak-specific attributes
+                        is_jailbreak = prompt_injection_result.get("is_jailbreak", False)
+                        high_risk = prompt_injection_result.get("high_risk", False)
+                        span.set_attribute("llm.prompt_injection.is_jailbreak", is_jailbreak)
+                        span.set_attribute("llm.prompt_injection.high_risk", high_risk)
+                        span.set_attribute("safety.prompt_injection.is_jailbreak", is_jailbreak)
+                        span.set_attribute("safety.prompt_injection.high_risk", high_risk)
+                        
+                        patterns = prompt_injection_result.get("patterns_matched", [])
+                        if patterns:
+                            span.set_attribute("llm.prompt_injection.patterns", ",".join(patterns))
+                            span.set_attribute("llm.prompt_injection.pattern_count", len(patterns))
+                        else:
+                            span.set_attribute("llm.prompt_injection.pattern_count", 0)
+                        
+                        # Add event for high-risk jailbreaks
+                        if high_risk or is_jailbreak:
+                            span.add_event(
+                                "jailbreak_detected",
+                                {
+                                    "risk_level": prompt_injection_result.get("risk_level", "high"),
+                                    "confidence": prompt_injection_result.get("confidence", 0.0),
+                                    "patterns": ",".join(patterns) if patterns else "",
+                                }
+                            )
+                    elif should_track_pii:
+                        # Initialize with default values if prompt not available
+                        prompt_injection_result = {
+                            "prompt_injection_detected": False,
+                            "confidence": 0.0,
+                            "patterns_matched": [],
+                            "risk_level": "low",
+                        }
+                        span.set_attribute("llm.prompt_injection.detected", False)
+                        span.set_attribute("prompt_injection.detected", False)
+                        span.set_attribute("llm.prompt_injection.confidence", 0.0)
+                        span.set_attribute("llm.prompt_injection.risk_level", "low")
+                        span.set_attribute("llm.prompt_injection.pattern_count", 0)
+                    
                     if should_track_pii and response_text and isinstance(response_text, str):
                         # Use toxicity detection method from config
                         toxicity_method = config.toxicity_detection_method if hasattr(config, 'toxicity_detection_method') else None
-                        safety_flags = analyze_safety(response_text, toxicity_method=toxicity_method)
+                        safety_flags = analyze_safety(response_text, toxicity_method=toxicity_method, check_prompt_injection=False)
                         
                         # Track PII with nested structure (matching previous implementation)
                         pii_detected = safety_flags.get("pii_detected", False)
@@ -321,12 +294,19 @@ def instrument_llm(
                         else:
                             span.set_attribute("llm.pii.count", 0)
                         
-                        # Track prompt injection
+                        # Track SQL/XSS injection (different from prompt injection)
                         injection_detected = safety_flags.get("injection_detected", False)
-                        span.set_attribute("llm.prompt_injection.detected", injection_detected)
                         
-                        # Track safety concerns
-                        has_concerns = pii_detected or injection_detected or safety_flags.get("toxicity_score", 0) > 0.5
+                        # Get prompt injection result (already checked above)
+                        prompt_injection_detected = prompt_injection_result.get("prompt_injection_detected", False) if prompt_injection_result else False
+                        
+                        # Track safety concerns (include prompt injection)
+                        has_concerns = (
+                            pii_detected 
+                            or injection_detected 
+                            or prompt_injection_detected
+                            or safety_flags.get("toxicity_score", 0) > 0.5
+                        )
                         span.set_attribute("llm.safety.has_concerns", has_concerns)
                         span.set_attribute("llm.safety.blocked", False)  # Can be set based on moderation API response
                         
@@ -348,7 +328,25 @@ def instrument_llm(
                         
                         # Keep old names for backward compatibility
                         span.set_attribute("safety.pii_detected", pii_detected)
-                        span.set_attribute("safety.prompt_injection_detected", injection_detected)
+                        span.set_attribute("safety.prompt_injection_detected", prompt_injection_detected)
+                        
+                        # Set comprehensive prompt injection attributes in safety section (always set)
+                        if prompt_injection_result:
+                            span.set_attribute("safety.prompt_injection.detected", prompt_injection_detected)
+                            span.set_attribute("safety.prompt_injection.confidence", prompt_injection_result.get("confidence", 0.0))
+                            span.set_attribute("safety.prompt_injection.risk_level", prompt_injection_result.get("risk_level", "low"))
+                            patterns = prompt_injection_result.get("patterns_matched", [])
+                            if patterns:
+                                span.set_attribute("safety.prompt_injection.patterns", ",".join(patterns))
+                        else:
+                            # Set default values if prompt injection wasn't checked
+                            span.set_attribute("safety.prompt_injection.detected", False)
+                            span.set_attribute("safety.prompt_injection.confidence", 0.0)
+                            span.set_attribute("safety.prompt_injection.risk_level", "low")
+                            # Set default values if prompt injection wasn't checked
+                            span.set_attribute("safety.prompt_injection.detected", False)
+                            span.set_attribute("safety.prompt_injection.confidence", 0.0)
+                            span.set_attribute("safety.prompt_injection.risk_level", "low")
 
                     # Track structured output if schema provided
                     if expected_schema and response_text and isinstance(response_text, str):
@@ -359,69 +357,8 @@ def instrument_llm(
                             span.set_attribute("llm.structured_output.success", False)
 
                     # Hallucination detection (if RAG context is available)
-                    # Check if there's a parent span with rag.context
                     try:
-                        from opentelemetry import trace as otel_trace
-                        import inspect
-                        current_span = otel_trace.get_current_span()
-                        rag_context = None
-                        
-                        # First try to get context from kwargs (common pattern in RAG)
-                        rag_context = kwargs.get("context") or kwargs.get("rag_context")
-                        
-                        # If not in kwargs, try to get from positional args
-                        # Check function signature to find context parameter
-                        if not rag_context:
-                            try:
-                                sig = inspect.signature(func)
-                                param_names = list(sig.parameters.keys())
-                                # Skip 'self' if it's a method
-                                param_offset = 1 if param_names and param_names[0] == 'self' else 0
-                                
-                                # Look for 'context' or 'rag_context' in parameter names
-                                context_param_idx = None
-                                for i, param_name in enumerate(param_names[param_offset:], start=param_offset):
-                                    if param_name in ['context', 'rag_context']:
-                                        # Calculate the index in the args array (accounting for param_offset)
-                                        context_param_idx = i - param_offset
-                                        break
-                                
-                                # If found, get from args
-                                if context_param_idx is not None and len(args) > context_param_idx:
-                                    rag_context = args[context_param_idx]
-                                # Fallback: try second positional arg if function has at least 2 params
-                                elif len(args) > 1 and len(param_names) > 1 + param_offset:
-                                    # Check if second param name suggests it's context
-                                    second_param = param_names[1 + param_offset]
-                                    if 'context' in second_param.lower() or 'doc' in second_param.lower() or 'rag' in second_param.lower():
-                                        rag_context = args[1]
-                                    # Or if it's a list (common for RAG contexts)
-                                    elif isinstance(args[1], list):
-                                        rag_context = args[1]
-                            except Exception as e:
-                                logger.debug(f"Could not inspect function signature: {e}")
-                        
-                        # If not in kwargs or args, try to get from parent span's rag.context attribute
-                        # OpenTelemetry doesn't directly expose parent span attributes,
-                        # but we can check the current span context for stored values
-                        if not rag_context and current_span:
-                            # Try to get rag.context from the span's context
-                            # This would be set by the RAG retriever wrapper
-                            # We'll check if it's available in the trace context
-                            try:
-                                # Access span context to get parent attributes
-                                # Note: This is a workaround - ideally parent span attributes
-                                # would be accessible, but OpenTelemetry doesn't expose them directly
-                                pass
-                            except:
-                                pass
-                        
-                        # Convert context to string if it's a list
-                        if rag_context:
-                            if isinstance(rag_context, list):
-                                rag_context = "\n".join(str(doc) for doc in rag_context if doc)
-                            elif not isinstance(rag_context, str):
-                                rag_context = str(rag_context)
+                        rag_context = extract_rag_context(func, args, kwargs)
                         
                         # Always create hallucination evaluation span (matching D:/Phoenix/anomaly_detection pattern)
                         # If context is available, run full evaluation; otherwise mark as "no context"
@@ -546,6 +483,8 @@ def instrument_llm(
 
                 except Exception as e:
                     timer.stop()
+                    # Record error metric
+                    record_error(type(e).__name__)
                     handle_error(span, e, {"function": func.__name__})
                     raise
 

@@ -9,7 +9,7 @@ import json
 import logging
 import os
 import re
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +92,7 @@ def evaluate_accuracy(
     ground_truth: str,
     predicted: str,
     use_llm: bool = True
-) -> Dict[str, any]:
+) -> Dict[str, Any]:
     """
     Evaluate accuracy of predicted answer against ground truth.
 

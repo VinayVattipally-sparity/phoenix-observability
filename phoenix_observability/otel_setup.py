@@ -14,9 +14,13 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.resources import Resource
 
-from phoenix_observability.config import get_config  # type: ignore
+from phoenix_observability.config import get_config
+from phoenix_observability.utils.security import sanitize_url, sanitize_name
 
 logger = logging.getLogger(__name__)
+
+# Constants
+# Queue size is now configurable via config.max_queue_size
 
 
 def create_phoenix_project(
@@ -30,17 +34,23 @@ def create_phoenix_project(
     Tries to use Phoenix client API if available, otherwise uses HTTP API directly.
     
     Args:
-        project_name: Name of the project to create
-        phoenix_endpoint: Phoenix server endpoint URL
+        project_name: Name of the project to create (will be sanitized)
+        phoenix_endpoint: Phoenix server endpoint URL (will be sanitized)
         description: Optional project description
         
     Returns:
         True if project was created or already exists, False on error
+        
+    Raises:
+        ValueError: If project_name or phoenix_endpoint are invalid
     """
     try:
+        # Sanitize inputs for security
+        project_name = sanitize_name(project_name)
+        phoenix_endpoint = sanitize_url(phoenix_endpoint)
         # Try using Phoenix client API (preferred method)
         try:
-            from phoenix.client import Client  # type: ignore
+            from phoenix.client import Client
             
             # Initialize client
             client = Client(base_url=phoenix_endpoint)
@@ -120,10 +130,13 @@ def init_observability(
     Initialize OpenTelemetry tracing for the project.
 
     Args:
-        service_name: Name of the service (overrides config default)
-        project_name: Name of the project (used to organize traces in Phoenix)
-        phoenix_endpoint: Phoenix endpoint URL (overrides config)
+        service_name: Name of the service (overrides config default, will be sanitized)
+        project_name: Name of the project (used to organize traces in Phoenix, will be sanitized)
+        phoenix_endpoint: Phoenix endpoint URL (overrides config, will be sanitized)
         environment: Environment name (dev/stage/prod, overrides config)
+        
+    Raises:
+        ValueError: If service_name, project_name, or phoenix_endpoint are invalid
     """
     import os
     
@@ -132,12 +145,34 @@ def init_observability(
     # Override config with provided parameters
     if service_name is None:
         service_name = config.default_service_name
+    else:
+        # Sanitize user-provided service name
+        service_name = sanitize_name(service_name)
+    
     if phoenix_endpoint is None:
         phoenix_endpoint = config.phoenix_endpoint
+    else:
+        # Sanitize user-provided endpoint URL (only if http/https, allow grpc:// for gRPC)
+        if phoenix_endpoint.startswith(("http://", "https://")):
+            phoenix_endpoint = sanitize_url(phoenix_endpoint)
+        # For grpc:// endpoints, just validate basic format
+        elif phoenix_endpoint.startswith("grpc://"):
+            from urllib.parse import urlparse
+            parsed = urlparse(phoenix_endpoint)
+            if not parsed.netloc:
+                raise ValueError("gRPC URL must include a hostname")
+        else:
+            # Try to sanitize, will raise error if invalid
+            phoenix_endpoint = sanitize_url(phoenix_endpoint)
+    
+    if project_name:
+        # Sanitize user-provided project name
+        project_name = sanitize_name(project_name)
+    
     if environment is None:
         environment = config.environment
     
-    # Use pure OpenTelemetry setup (matching reference implementation in D:\phoenix_package exactly)
+    # Use pure OpenTelemetry setup (matching reference implementation)
     # The reference does NOT use Phoenix register() - it uses pure OpenTelemetry with HttpExporter
     # This matches rag_mini_app which also uses pure OpenTelemetry
     # NOTE: For project organization, we rely on resource attributes and span attributes
@@ -171,7 +206,7 @@ def init_observability(
 
     # Configure OTLP exporter (matching reference implementation exactly)
     # IMPORTANT: For fallback, use OTEL_EXPORTER_OTLP_ENDPOINT if available (it has the full path)
-    # Otherwise construct from config.otlp_endpoint or phoenix_endpoint
+    # Otherwise construct from phoenix_endpoint parameter (if provided) or config.otlp_endpoint
     # HttpExporter requires full path with /v1/traces
     otlp_endpoint = None
     
@@ -179,14 +214,19 @@ def init_observability(
     if os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"):
         otlp_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
         logger.info(f"Using OTEL_EXPORTER_OTLP_ENDPOINT from environment: {otlp_endpoint}")
+    elif phoenix_endpoint:
+        # If phoenix_endpoint parameter was provided, use it (takes precedence over config)
+        # For gRPC endpoints, use as-is (gRPC doesn't need /v1/traces path)
+        if phoenix_endpoint.startswith("grpc://"):
+            otlp_endpoint = phoenix_endpoint
+        else:
+            # For HTTP endpoints, add /v1/traces path
+            otlp_endpoint = f"{phoenix_endpoint.rstrip('/')}/v1/traces"
     elif config.otlp_endpoint:
         otlp_endpoint = config.otlp_endpoint
-    elif phoenix_endpoint:
-        # Construct OTLP endpoint from Phoenix endpoint (matching reference line 69)
-        otlp_endpoint = f"{phoenix_endpoint.rstrip('/')}/v1/traces"
     
-    # Always ensure /v1/traces is present (HttpExporter requires full path)
-    if otlp_endpoint and not otlp_endpoint.endswith('/v1/traces'):
+    # Always ensure /v1/traces is present for HTTP endpoints (HttpExporter requires full path)
+    if otlp_endpoint and not otlp_endpoint.startswith("grpc://") and not otlp_endpoint.endswith('/v1/traces'):
         otlp_endpoint = f"{otlp_endpoint.rstrip('/')}/v1/traces"
         logger.info(f"Added /v1/traces to endpoint: {otlp_endpoint}")
     
@@ -219,7 +259,7 @@ def init_observability(
     # Create batch processor for performance
     span_processor = BatchSpanProcessor(
         exporter,
-        max_queue_size=2048,
+        max_queue_size=config.max_queue_size,
         export_timeout_millis=config.batch_timeout_ms,
         max_export_batch_size=config.max_export_batch_size,
     )
@@ -230,24 +270,32 @@ def init_observability(
     # Set global tracer provider
     trace.set_tracer_provider(tracer_provider)
 
-    log_msg = f"OpenTelemetry initialized for service '{service_name}'"
+    # Build log message efficiently
     if project_name:
-        log_msg += f" in project '{project_name}'"
-    log_msg += f" with Phoenix endpoint: {phoenix_endpoint}"
+        log_msg = f"OpenTelemetry initialized for service '{service_name}' in project '{project_name}' with Phoenix endpoint: {phoenix_endpoint}"
+    else:
+        log_msg = f"OpenTelemetry initialized for service '{service_name}' with Phoenix endpoint: {phoenix_endpoint}"
     logger.info(log_msg)
 
 
-def get_tracer(name: str = None):
+def get_tracer(name: Optional[str] = None) -> trace.Tracer:
     """
     Get a tracer instance.
 
     Args:
-        name: Name of the tracer (defaults to service name)
+        name: Name of the tracer (defaults to service name). If provided, must be a non-empty string.
 
     Returns:
         Tracer instance
     """
     config = get_config()
+    # Validate name if provided
+    if name is not None:
+        if not isinstance(name, str):
+            raise TypeError(f"Tracer name must be a string, got {type(name).__name__}")
+        if not name.strip():
+            # Empty string treated as None, use default
+            name = None
     tracer_name = name or config.default_service_name
     return trace.get_tracer(tracer_name)
 

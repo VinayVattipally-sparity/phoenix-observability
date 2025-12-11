@@ -6,14 +6,14 @@ Tracks CPU, memory, and GPU usage.
 
 import logging
 import psutil
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from phoenix_observability.utils.gpu_monitor import get_gpu_monitor
 
 logger = logging.getLogger(__name__)
 
 
-def get_system_metrics() -> Dict[str, any]:
+def get_system_metrics() -> Dict[str, Any]:
     """
     Get current system metrics.
     

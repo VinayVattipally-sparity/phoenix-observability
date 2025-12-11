@@ -8,17 +8,20 @@ A unified observability SDK for LLM projects using Arize Phoenix and OpenTelemet
 
 ## Features
 
-- **OpenTelemetry Integration**: Full OTLP support for distributed tracing
-- **Phoenix Integration**: Native support for Arize Phoenix observability platform
-- **LLM Instrumentation**: Automatic instrumentation for LLM calls with cost and latency tracking
-- **RAG Support**: Instrumentation for retrieval-augmented generation systems
-- **Agent Support**: Wrapper for agent-based LLM applications
-- **Pipeline Tracking**: End-to-end pipeline observability
-- **Cost Tracking**: Automatic cost calculation for LLM API calls
-- **Hallucination Detection**: Built-in hallucination detection capabilities
-- **PII Safety**: Automatic PII detection and safety analysis
-- **System Metrics**: CPU, memory, and GPU monitoring
-- **Error Handling**: Comprehensive error tracking and reporting
+- **🔍 OpenTelemetry Integration**: Full OTLP support for distributed tracing
+- **🦅 Phoenix Integration**: Native support for Arize Phoenix observability platform
+- **🤖 LLM Instrumentation**: Automatic instrumentation for LLM calls with cost and latency tracking
+- **📚 RAG Support**: Instrumentation for retrieval-augmented generation systems
+- **🤝 Agent Support**: Wrapper for agent-based LLM applications
+- **🔄 Pipeline Tracking**: End-to-end pipeline observability
+- **💰 Cost Tracking**: Automatic cost calculation for LLM API calls
+- **🎭 Hallucination Detection**: Built-in hallucination detection capabilities
+- **🔒 PII Safety**: Automatic PII detection and safety analysis
+- **📊 System Metrics**: CPU, memory, and GPU monitoring
+- **⚠️ Error Handling**: Comprehensive error tracking and reporting
+- **⚡ Rate Limiting**: Built-in rate limiting for external API calls
+- **🌐 Connection Pooling**: HTTP connection pooling for better performance
+- **⚙️ Configurable**: Highly configurable via environment variables
 
 ## Installation
 
@@ -32,6 +35,12 @@ pip install phoenix-observability
 
 ```bash
 pip install phoenix-observability[phoenix]
+```
+
+### With Development Dependencies
+
+```bash
+pip install phoenix-observability[test,lint,docs]
 ```
 
 ## Quick Start
@@ -55,31 +64,14 @@ init_observability(service_name="my-llm-service")
 # Instrument your LLM calls
 @instrument_llm
 def my_llm_function(prompt: str):
-    # Your LLM code here
-    return response
+    from openai import OpenAI
+    client = OpenAI()
+    response = client.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return response.choices[0].message.content
 ```
-
-## Configuration
-
-Configuration is managed through environment variables or the `ObservabilityConfig` class:
-
-```python
-from phoenix_observability.config import ObservabilityConfig
-
-config = ObservabilityConfig()
-```
-
-### Environment Variables
-
-- `PHOENIX_ENDPOINT`: Phoenix server endpoint (**required** - must be set in your `.env` file)
-- `ENVIRONMENT`: Deployment environment (default: `dev`)
-- `ENABLE_GPU_TRACKING`: Enable GPU monitoring (default: `false`)
-- `ENABLE_PII_TRACKING`: Enable PII detection (default: `true`)
-- `ENABLE_COST_TRACKING`: Enable cost tracking (default: `true`)
-- `SERVICE_NAME`: Default service name (default: `phoenix_observability`)
-- `OTLP_ENDPOINT`: Custom OTLP endpoint (optional)
-- `BATCH_TIMEOUT_MS`: Batch export timeout (default: `5000`)
-- `MAX_EXPORT_BATCH_SIZE`: Maximum batch size (default: `512`)
 
 ## Usage Examples
 
@@ -88,10 +80,15 @@ config = ObservabilityConfig()
 ```python
 from phoenix_observability import instrument_llm
 
-@instrument_llm
+@instrument_llm(model_name="gpt-4", track_cost=True)
 def call_openai(prompt: str):
-    # Your OpenAI call here
-    pass
+    from openai import OpenAI
+    client = OpenAI()
+    response = client.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return response.choices[0].message.content
 ```
 
 ### RAG Instrumentation
@@ -99,10 +96,11 @@ def call_openai(prompt: str):
 ```python
 from phoenix_observability import instrument_retriever
 
-@instrument_retriever
+@instrument_retriever(log_documents=True)
 def retrieve_documents(query: str):
     # Your retrieval logic here
-    pass
+    results = vector_db.search(query, top_k=5)
+    return results
 ```
 
 ### Agent Instrumentation
@@ -110,10 +108,12 @@ def retrieve_documents(query: str):
 ```python
 from phoenix_observability import instrument_agent
 
-@instrument_agent
-def my_agent_function(input_data):
+@instrument_agent(log_tool_inputs=True, log_tool_outputs=True)
+def my_agent(input_data):
     # Your agent logic here
-    pass
+    tools = get_available_tools()
+    result = agent.run(input_data, tools=tools)
+    return result
 ```
 
 ### Pipeline Instrumentation
@@ -121,10 +121,53 @@ def my_agent_function(input_data):
 ```python
 from phoenix_observability import instrument_pipeline
 
-@instrument_pipeline
-def my_pipeline(input_data):
-    # Your pipeline logic here
-    pass
+@instrument_pipeline(pipeline_name="rag-pipeline")
+def complete_rag_pipeline(query: str):
+    docs = retrieve_documents(query)
+    context = format_context(docs)
+    response = generate_response(context, query)
+    return response
+```
+
+For more examples, see the [Examples Documentation](docs/examples.md).
+
+## Configuration
+
+Configuration is managed through environment variables. See the [Configuration Guide](docs/getting-started/configuration.md) for complete details.
+
+### Key Environment Variables
+
+- `PHOENIX_ENDPOINT`: Phoenix server endpoint (**required**)
+- `SERVICE_NAME`: Default service name (default: `phoenix_observability`)
+- `ENVIRONMENT`: Deployment environment (default: `dev`)
+- `ENABLE_COST_TRACKING`: Enable cost tracking (default: `true`)
+- `ENABLE_PII_TRACKING`: Enable PII detection (default: `true`)
+- `MAX_QUEUE_SIZE`: Maximum queue size (default: `2048`)
+- `RATE_LIMIT_REQUESTS_PER_SECOND`: Rate limit per second (default: `10`)
+
+See [Configuration Guide](docs/getting-started/configuration.md) for all options.
+
+## Documentation
+
+- **[Getting Started](docs/getting-started/quick-start.md)** - Quick setup guide
+- **[Configuration Guide](docs/getting-started/configuration.md)** - Complete configuration reference
+- **[Usage Examples](docs/examples.md)** - Comprehensive code examples
+- **[Architecture](docs/architecture.md)** - System architecture and design
+- **[API Reference](docs/api/core/config.md)** - Complete API documentation
+- **[Security Guide](SECURITY.md)** - Security best practices
+- **[CHANGELOG](CHANGELOG.md)** - Version history and changes
+
+### Building Documentation
+
+```bash
+# Install docs dependencies
+pip install phoenix-observability[docs]
+
+# Build documentation
+mkdocs build
+
+# Serve documentation locally
+mkdocs serve
 ```
 
 ## Package Structure
@@ -132,29 +175,25 @@ def my_pipeline(input_data):
 ```
 phoenix_observability/
 ├── __init__.py
-├── config.py
-├── otel_setup.py
-├── phoenix_session.py
-├── instrumentation/
+├── config.py                 # Configuration management
+├── otel_setup.py             # OpenTelemetry setup
+├── phoenix_session.py        # Phoenix session management
+├── instrumentation/          # Instrumentation decorators
 │   ├── llm_wrapper.py
 │   ├── rag_wrapper.py
 │   ├── agent_wrapper.py
 │   ├── pipeline_wrapper.py
 │   ├── error_handler.py
 │   └── structured_output.py
-├── utils/
+├── utils/                    # Utility modules
 │   ├── cost_tracker.py
-│   ├── latency.py
-│   ├── hallucination.py
-│   ├── accuracy.py
-│   ├── pii_safety.py
-│   ├── system_metrics.py
-│   ├── gpu_monitor.py
+│   ├── rate_limiter.py
+│   ├── http_client.py
 │   ├── sanitize.py
-│   └── pipeline_tracker.py
-└── logging/
-    ├── span_utils.py
-    └── enrich.py
+│   ├── security.py
+│   └── ...
+└── logging/                  # Logging utilities
+    └── structured.py
 ```
 
 ## Requirements
@@ -167,12 +206,61 @@ phoenix_observability/
 
 Optional:
 - arize-phoenix 2.5.0+ (for Phoenix UI support)
+- openai 1.0.0+ (for OpenAI integrations)
+- anthropic 0.7.0+ (for Anthropic integrations)
+- google-generativeai 0.3.0+ (for Gemini integrations)
 
-## License
+## Security
 
-MIT
+For security best practices, API key management, and secure deployment guidelines, see [SECURITY.md](SECURITY.md).
+
+**Key Security Features:**
+- ✅ API key format validation
+- ✅ Input sanitization for URLs and names
+- ✅ Automatic redaction of sensitive data from error messages
+- ✅ Secure connections by default (`OTLP_INSECURE=false`)
+- ✅ Comprehensive security documentation
+
+## Testing
+
+```bash
+# Install test dependencies
+pip install phoenix-observability[test]
+
+# Run tests
+pytest
+
+# Run with coverage
+pytest --cov=phoenix_observability --cov-report=html
+```
+
+## Performance Benchmarks
+
+```bash
+# Install benchmark dependencies
+pip install phoenix-observability[benchmark]
+
+# Run benchmarks
+pytest benchmarks/
+```
 
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests
+5. Run linting and type checking
+6. Submit a pull request
+
+## License
+
+MIT
+
+## Support
+
+For issues, questions, or contributions:
+- GitHub Issues: [Create an issue](https://github.com/VinayVattipally-sparity/phoenix-observability/issues)
+- Documentation: [Full Documentation](docs/index.md)

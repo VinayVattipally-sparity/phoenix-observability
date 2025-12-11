@@ -5,11 +5,18 @@ Loads configuration from environment variables (typically from .env file).
 """
 
 import os
+import threading
 from typing import Optional, Dict
-from dotenv import load_dotenv
 
 # Load environment variables from .env file
-load_dotenv()
+# Use try/except to handle cases where dotenv is not available or .env doesn't exist
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except (ImportError, Exception):
+    # If dotenv is not available or fails to load, continue without it
+    # Environment variables can still be set via system environment
+    pass
 
 
 class ObservabilityConfig:
@@ -55,22 +62,63 @@ class ObservabilityConfig:
         self.max_export_batch_size: int = int(
             os.getenv("MAX_EXPORT_BATCH_SIZE", "512")
         )
+        self.max_queue_size: int = int(
+            os.getenv("MAX_QUEUE_SIZE", "2048")
+        )
 
         # Sanitization settings
         self.max_prompt_length: int = int(os.getenv("MAX_PROMPT_LENGTH", "10000"))
         self.max_response_length: int = int(
             os.getenv("MAX_RESPONSE_LENGTH", "50000")
         )
+        self.max_context_length: int = int(
+            os.getenv("MAX_CONTEXT_LENGTH", "50000")
+        )
+        self.max_value_length: int = int(
+            os.getenv("MAX_VALUE_LENGTH", "1000")
+        )
+        self.max_span_attribute_length: int = int(
+            os.getenv("MAX_SPAN_ATTRIBUTE_LENGTH", "1000")
+        )
+        
+        # Rate limiting settings for external API calls
+        self.rate_limit_requests_per_minute: int = int(
+            os.getenv("RATE_LIMIT_REQUESTS_PER_MINUTE", "60")
+        )
+        self.rate_limit_requests_per_second: int = int(
+            os.getenv("RATE_LIMIT_REQUESTS_PER_SECOND", "10")
+        )
+        self.rate_limit_enabled: bool = os.getenv(
+            "RATE_LIMIT_ENABLED", "true"
+        ).lower() == "true"
+        
+        # HTTP connection pooling settings
+        self.http_pool_connections: int = int(
+            os.getenv("HTTP_POOL_CONNECTIONS", "10")
+        )
+        self.http_pool_maxsize: int = int(
+            os.getenv("HTTP_POOL_MAXSIZE", "20")
+        )
+        self.http_timeout: int = int(
+            os.getenv("HTTP_TIMEOUT", "30")
+        )
 
         # OTLP exporter settings
+        # SECURITY: Default to secure (False) - set OTLP_INSECURE=true only for local development
+        # In production, always use secure connections (HTTPS/gRPC with TLS)
         self.otlp_insecure: bool = os.getenv(
-            "OTLP_INSECURE", "true"
-        ).lower() == "true"  # Default to insecure for local development
+            "OTLP_INSECURE", "false"
+        ).lower() == "true"
 
         # Toxicity detection settings
         self.toxicity_detection_method: str = os.getenv(
             "TOXICITY_DETECTION_METHOD", "auto"
         ).lower()  # Options: 'auto', 'openai', 'perspective', 'heuristic'
+        
+        # Jailbreak detection and notification settings
+        self.enable_jailbreak_warnings: bool = os.getenv(
+            "ENABLE_JAILBREAK_WARNINGS", "true"
+        ).lower() == "true"
 
         # Authentication settings (with fallback to defaults)
         # OTLP authentication headers (for Phoenix/OTLP endpoint authentication)
@@ -158,19 +206,35 @@ class ObservabilityConfig:
         )
 
 
-# Global configuration instance
+# Global configuration instance with thread-safety
 _config: Optional[ObservabilityConfig] = None
+_config_lock = threading.Lock()
 
 
 def get_config() -> ObservabilityConfig:
-    """Get or create the global configuration instance."""
+    """
+    Get or create the global configuration instance (thread-safe).
+
+    Returns:
+        ObservabilityConfig instance.
+    """
     global _config
+    # Double-checked locking pattern for thread-safety
     if _config is None:
-        _config = ObservabilityConfig()
+        with _config_lock:
+            # Check again inside the lock to avoid race conditions
+            if _config is None:
+                _config = ObservabilityConfig()
     return _config
 
 
 def reset_config():
-    """Reset the global configuration (useful for testing)."""
+    """
+    Reset the global configuration (useful for testing, thread-safe).
+
+    Note: This should only be used in tests. In production, the config
+    should remain stable throughout the application lifecycle.
+    """
     global _config
-    _config = None
+    with _config_lock:
+        _config = None

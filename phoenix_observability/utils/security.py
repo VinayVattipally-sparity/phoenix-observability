@@ -13,14 +13,16 @@ from urllib.parse import urlparse
 logger = logging.getLogger(__name__)
 
 # API key patterns for validation
-OPENAI_API_KEY_PATTERN = re.compile(r'^sk-[a-zA-Z0-9]{32,}$')
+# OpenAI keys can be: sk-... (traditional) or sk-proj-... (project keys)
+# Both formats may contain hyphens and alphanumeric characters
+OPENAI_API_KEY_PATTERN = re.compile(r'^sk-(proj-)?[a-zA-Z0-9\-]{32,}$')
 ANTHROPIC_API_KEY_PATTERN = re.compile(r'^sk-ant-[a-zA-Z0-9\-_]{95,}$')
 GEMINI_API_KEY_PATTERN = re.compile(r'^[a-zA-Z0-9_-]{20,}$')  # Gemini keys are alphanumeric, typically 39 chars
 GOOGLE_API_KEY_PATTERN = re.compile(r'^[a-zA-Z0-9_-]{20,}$')  # Google API keys are similar
 
 # Patterns for detecting sensitive data
 SENSITIVE_PATTERNS = [
-    re.compile(r'sk-[a-zA-Z0-9]{10,}', re.IGNORECASE),  # API keys (OpenAI, Anthropic, etc.)
+    re.compile(r'sk-[a-zA-Z0-9]{6,}', re.IGNORECASE),  # API keys (OpenAI, Anthropic, etc.) - minimum 6 chars after sk-
     re.compile(r'Bearer\s+[a-zA-Z0-9\-_]{20,}', re.IGNORECASE),  # Bearer tokens
     re.compile(r'api[_-]?key["\']?\s*[:=]\s*["\']?[a-zA-Z0-9\-_]{10,}', re.IGNORECASE),
     re.compile(r'token["\']?\s*[:=]\s*["\']?[a-zA-Z0-9\-_]{10,}', re.IGNORECASE),
@@ -81,18 +83,22 @@ def sanitize_url(url: str) -> str:
         parsed = urlparse(url)
         if not parsed.scheme:
             raise ValueError("URL must include a scheme (http:// or https://)")
+        
+        # Only allow http and https schemes (check scheme before netloc for better error)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(f"URL scheme must be http or https, got {parsed.scheme}")
+        
         if not parsed.netloc:
             raise ValueError("URL must include a hostname")
-        
-            # Only allow http and https schemes (check before netloc to get better error)
-            if parsed.scheme not in ("http", "https"):
-                raise ValueError(f"URL scheme must be http or https, got {parsed.scheme}")
         
         # Remove any query parameters that might contain sensitive data
         # Keep only the base URL
         sanitized = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
         
         return sanitized.rstrip('/')
+    except ValueError:
+        # Re-raise ValueError as-is
+        raise
     except Exception as e:
         raise ValueError(f"Invalid URL format: {e}")
 
@@ -120,23 +126,23 @@ def sanitize_name(name: str, max_length: int = 100, allow_special: bool = False)
     if len(name) > max_length:
         raise ValueError(f"Name exceeds maximum length of {max_length} characters")
     
+    # Prevent common injection patterns first (before regex check for better error messages)
+    dangerous_patterns = [
+        (r'\.\.', "path traversal"),  # Path traversal
+        (r'[<>"\']', "HTML/script injection"),  # HTML/script injection
+        (r'[;&|`$]', "command injection"),  # Command injection
+    ]
+    
+    for pattern, description in dangerous_patterns:
+        if re.search(pattern, name):
+            raise ValueError(f"Name contains invalid characters: {name}")
+    
     if not allow_special:
         # Only allow alphanumeric, hyphens, underscores, and dots
         if not re.match(r'^[a-zA-Z0-9._-]+$', name):
             raise ValueError(
                 "Name can only contain alphanumeric characters, dots, hyphens, and underscores"
             )
-    
-    # Prevent common injection patterns
-    dangerous_patterns = [
-        r'\.\.',  # Path traversal
-        r'[<>"\']',  # HTML/script injection
-        r'[;&|`$]',  # Command injection
-    ]
-    
-    for pattern in dangerous_patterns:
-        if re.search(pattern, name):
-            raise ValueError(f"Name contains invalid characters: {name}")
     
     return name
 

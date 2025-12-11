@@ -18,17 +18,44 @@ logger = logging.getLogger(__name__)
 
 def instrument_pipeline(
     pipeline_name: Optional[str] = None,
-):
+) -> Callable[[Callable], Callable]:
     """
-    Decorator to instrument complete pipelines (e.g., RAG pipelines, agent workflows).
-    
-    Tracks pipeline.latency_ms for end-to-end execution time.
-    
+    Decorator to instrument complete pipelines for end-to-end observability.
+
+    This decorator creates high-level spans that track the complete execution of multi-stage
+    pipelines (e.g., RAG pipelines, agent workflows, data processing pipelines). It measures
+    total pipeline latency and can be used in combination with other instrumentation decorators
+    to create nested spans.
+
     Args:
-        pipeline_name: Name of the pipeline (defaults to function name)
-    
+        pipeline_name: Name identifier for this pipeline (e.g., "rag_pipeline", "data_processing").
+            If not provided, defaults to the decorated function's name. Used in span names
+            and attributes for identification. Should be descriptive to help identify the pipeline
+            in observability dashboards.
+
     Returns:
-        Decorated function
+        A decorator function that wraps the original function with observability instrumentation.
+        The wrapped function maintains the same signature and return value as the original.
+        The span tracks the total execution time as `pipeline.latency_ms`.
+
+    Example:
+        Basic usage::
+
+            @instrument_pipeline(pipeline_name="rag_pipeline")
+            def complete_rag_pipeline(query: str):
+                docs = retrieve_documents(query)
+                context = format_context(docs)
+                response = generate_response(context, query)
+                return response
+
+        With nested instrumentation::
+
+            @instrument_pipeline(pipeline_name="multi_stage")
+            def multi_stage_pipeline(input_data):
+                # This creates a parent span
+                stage1_result = stage1(input_data)  # Can have its own @instrument_llm
+                stage2_result = stage2(stage1_result)  # Can have its own instrumentation
+                return stage2_result
     """
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)

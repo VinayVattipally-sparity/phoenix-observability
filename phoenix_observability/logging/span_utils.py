@@ -51,7 +51,8 @@ def set_nested_attribute(
         # Primitive value
         value_str = str(value)
         if len(value_str) > max_length:
-            value_str = value_str[:max_length] + "... [truncated]"
+            truncation_msg = "... [truncated]"
+            value_str = f"{value_str[:max_length - len(truncation_msg)]}{truncation_msg}"
         span.set_attribute(key, value_str)
 
 
@@ -77,6 +78,7 @@ def set_span_attributes(
         else:
             value_str = str(value)
             if len(value_str) > max_length:
-                value_str = value_str[:max_length] + "... [truncated]"
+                truncation_msg = "... [truncated]"
+                value_str = f"{value_str[:max_length - len(truncation_msg)]}{truncation_msg}"
             span.set_attribute(full_key, value_str)
 

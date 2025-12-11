@@ -6,7 +6,9 @@ Lightweight timer for measuring execution time.
 
 import time
 from contextlib import contextmanager
-from typing import Optional
+from typing import Any, Callable, Optional
+
+from opentelemetry import trace
 
 
 class LatencyTimer:
@@ -67,7 +69,7 @@ class LatencyTimer:
             self.stop()
 
 
-def measure_latency(func):
+def measure_latency(func: Callable) -> Callable:
     """
     Decorator to measure function execution latency.
 
@@ -94,7 +96,7 @@ def measure_latency(func):
     return wrapper
 
 
-def track_pipeline_latency(span, latency_seconds: float) -> None:
+def track_pipeline_latency(span: trace.Span, latency_seconds: float) -> None:
     """
     Track pipeline-level latency in milliseconds.
 

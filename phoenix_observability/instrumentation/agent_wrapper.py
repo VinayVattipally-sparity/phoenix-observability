@@ -13,6 +13,10 @@ from opentelemetry import trace
 from phoenix_observability.otel_setup import get_tracer
 from phoenix_observability.utils.latency import LatencyTimer
 from phoenix_observability.instrumentation.error_handler import handle_error
+from phoenix_observability.instrumentation.span_helpers import (
+    extract_project_and_service_name,
+    set_span_project_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,19 +27,55 @@ def instrument_agent(
     log_tool_outputs: bool = True,
     log_intermediate_steps: bool = False,
     service_name: Optional[str] = None,
-):
+) -> Callable[[Callable], Callable]:
     """
-    Decorator to instrument agent operations.
+    Decorator to instrument agent-based LLM operations.
+
+    This decorator automatically creates OpenTelemetry spans for agent operations, tracking
+    tool invocations, inputs/outputs, intermediate reasoning steps, and overall agent execution.
+    Designed for use with agent frameworks like LangChain, AutoGPT, and custom agent implementations.
 
     Args:
-        agent_name: Name of the agent (defaults to function name)
-        log_tool_inputs: Whether to log tool inputs
-        log_tool_outputs: Whether to log tool outputs
-        log_intermediate_steps: Whether to log intermediate reasoning steps
-        service_name: Optional service name for this agent (overrides resource-level service.name)
+        agent_name: Name identifier for this agent (e.g., "research_agent", "coding_agent").
+            If not provided, defaults to the decorated function's name. Used in span names
+            and attributes for identification.
+        log_tool_inputs: Whether to log the inputs passed to tools during agent execution.
+            When True, tool inputs are attached as span attributes. Useful for debugging
+            and understanding agent behavior. Defaults to True.
+        log_tool_outputs: Whether to log the outputs returned from tools during agent execution.
+            When True, tool outputs are attached as span attributes. May be truncated for
+            large outputs. Defaults to True.
+        log_intermediate_steps: Whether to log intermediate reasoning steps and agent state.
+            When True, intermediate steps (thoughts, plans, etc.) are logged. This can generate
+            significant data, so use judiciously. Defaults to False.
+        service_name: Optional service name for this specific agent. If provided, overrides
+            the resource-level service.name attribute for this span. Useful for distinguishing
+            different agent services within the same application.
 
     Returns:
-        Decorated function
+        A decorator function that wraps the original function with observability instrumentation.
+        The wrapped function maintains the same signature and return value as the original.
+
+    Example:
+        Basic usage::
+
+            @instrument_agent
+            def my_agent(user_input: str):
+                tools = get_available_tools()
+                result = agent.run(user_input, tools=tools)
+                return result
+
+        With detailed logging::
+
+            @instrument_agent(
+                agent_name="research_agent",
+                log_tool_inputs=True,
+                log_tool_outputs=True,
+                log_intermediate_steps=True
+            )
+            def research_agent(query: str):
+                # All tool calls and reasoning steps will be logged
+                return agent.execute(query)
     """
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
@@ -48,37 +88,9 @@ def instrument_agent(
                 # Set OpenInference span kind for agents
                 span.set_attribute("openinference.span.kind", "CHAIN")
                 
-                # Add project_name and service_name from resource or environment
-                from phoenix_observability.config import get_config
-                config = get_config()
-                import os
-                project_name = os.getenv("PHOENIX_PROJECT_NAME") or config.default_service_name
-                # Use service_name from decorator parameter if provided, otherwise get from resource
-                final_service_name = service_name  # Use decorator parameter if provided
-                
-                # Try to get from resource attributes if available (only if not provided in decorator)
-                try:
-                    from opentelemetry import trace as otel_trace
-                    tracer_provider = otel_trace.get_tracer_provider()
-                    if hasattr(tracer_provider, 'resource') and tracer_provider.resource:
-                        resource_attrs = dict(tracer_provider.resource.attributes)
-                        project_name = resource_attrs.get("project.name") or resource_attrs.get("project.id") or project_name
-                        # Only use resource service.name if not provided in decorator parameter
-                        if not final_service_name:
-                            final_service_name = resource_attrs.get("service.name")
-                except:
-                    pass
-                
-                # Fallback to config default if still not set
-                if not final_service_name:
-                    final_service_name = config.default_service_name
-                
-                # Set project and service attributes on span
-                if project_name:
-                    span.set_attribute("project.name", project_name)
-                    span.set_attribute("project.id", project_name)
-                if final_service_name:
-                    span.set_attribute("service.name", final_service_name)
+                # Extract and set project/service names
+                project_name, final_service_name = extract_project_and_service_name(service_name)
+                set_span_project_service(span, project_name, final_service_name)
                 
                 span.set_attribute("agent.step.name", name)
                 # Keep old name for backward compatibility

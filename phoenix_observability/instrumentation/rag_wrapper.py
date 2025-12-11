@@ -10,9 +10,14 @@ from typing import Any, Callable, List, Optional
 
 from opentelemetry import trace
 
+from phoenix_observability.config import get_config
 from phoenix_observability.otel_setup import get_tracer
 from phoenix_observability.utils.latency import LatencyTimer
 from phoenix_observability.instrumentation.error_handler import handle_error
+from phoenix_observability.instrumentation.span_helpers import (
+    extract_project_and_service_name,
+    set_span_project_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,18 +27,50 @@ def instrument_retriever(
     log_documents: bool = True,
     log_metadata: bool = True,
     service_name: Optional[str] = None,
-):
+) -> Callable[[Callable], Callable]:
     """
-    Decorator to instrument RAG retrieval operations.
+    Decorator to instrument RAG (Retrieval-Augmented Generation) retrieval operations.
+
+    This decorator automatically creates OpenTelemetry spans for document retrieval operations,
+    tracking queries, retrieved documents, metadata, and latency. Designed for use with
+    vector databases, search engines, and other retrieval systems.
 
     Args:
-        retriever_name: Name of the retriever (defaults to function name)
-        log_documents: Whether to log document contents
-        log_metadata: Whether to log metadata
-        service_name: Optional service name for this retriever (overrides resource-level service.name)
+        retriever_name: Name identifier for this retriever (e.g., "vector_db", "elasticsearch").
+            If not provided, defaults to the decorated function's name. Used in span names
+            and attributes for identification.
+        log_documents: Whether to log the full content of retrieved documents to the span.
+            When True, document contents are attached as span attributes. For large document
+            sets, contents may be truncated based on config.max_context_length. Defaults to True.
+        log_metadata: Whether to log metadata associated with retrieved documents (e.g., scores,
+            sources, timestamps). When True, metadata is attached to span attributes.
+            Defaults to True.
+        service_name: Optional service name for this specific retriever. If provided, overrides
+            the resource-level service.name attribute for this span. Useful for distinguishing
+            different retrieval services within the same application.
 
     Returns:
-        Decorated function
+        A decorator function that wraps the original function with observability instrumentation.
+        The wrapped function maintains the same signature and return value as the original.
+
+    Example:
+        Basic usage::
+
+            @instrument_retriever
+            def search_documents(query: str):
+                results = vector_db.search(query, top_k=5)
+                return results
+
+        With custom name and selective logging::
+
+            @instrument_retriever(
+                retriever_name="elasticsearch",
+                log_documents=True,
+                log_metadata=False
+            )
+            def elasticsearch_search(query: str):
+                # Only documents logged, not metadata
+                return es_client.search(query)
     """
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
@@ -46,37 +83,9 @@ def instrument_retriever(
                 # Set OpenInference span kind for retrievers
                 span.set_attribute("openinference.span.kind", "RETRIEVER")
                 
-                # Add project_name and service_name from resource or environment
-                from phoenix_observability.config import get_config
-                config = get_config()
-                import os
-                project_name = os.getenv("PHOENIX_PROJECT_NAME") or config.default_service_name
-                # Use service_name from decorator parameter if provided, otherwise get from resource
-                final_service_name = service_name  # Use decorator parameter if provided
-                
-                # Try to get from resource attributes if available (only if not provided in decorator)
-                try:
-                    from opentelemetry import trace as otel_trace
-                    tracer_provider = otel_trace.get_tracer_provider()
-                    if hasattr(tracer_provider, 'resource') and tracer_provider.resource:
-                        resource_attrs = dict(tracer_provider.resource.attributes)
-                        project_name = resource_attrs.get("project.name") or resource_attrs.get("project.id") or project_name
-                        # Only use resource service.name if not provided in decorator parameter
-                        if not final_service_name:
-                            final_service_name = resource_attrs.get("service.name")
-                except:
-                    pass
-                
-                # Fallback to config default if still not set
-                if not final_service_name:
-                    final_service_name = config.default_service_name
-                
-                # Set project and service attributes on span
-                if project_name:
-                    span.set_attribute("project.name", project_name)
-                    span.set_attribute("project.id", project_name)
-                if final_service_name:
-                    span.set_attribute("service.name", final_service_name)
+                # Extract and set project/service names
+                project_name, final_service_name = extract_project_and_service_name(service_name)
+                set_span_project_service(span, project_name, final_service_name)
                 
                 span.set_attribute("rag.retriever", name)
                 span.set_attribute("rag.function", func.__name__)
@@ -138,9 +147,10 @@ def instrument_retriever(
                         if context_parts:
                             context_str = "\n\n".join(context_parts)
                             # Truncate to reasonable length (Phoenix can handle up to ~50k chars)
-                            max_context_length = 50000
+                            max_context_length = get_config().max_context_length
                             if len(context_str) > max_context_length:
-                                context_str = context_str[:max_context_length] + "... [truncated]"
+                                truncation_msg = "... [truncated]"
+                                context_str = f"{context_str[:max_context_length - len(truncation_msg)]}{truncation_msg}"
                             span.set_attribute("rag.context", context_str)
 
                         # Log document contents if enabled

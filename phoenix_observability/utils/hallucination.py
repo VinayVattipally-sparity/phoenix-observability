@@ -11,7 +11,7 @@ import json
 import logging
 import os
 import re
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -37,27 +37,125 @@ try:
 except ImportError:
     ANTHROPIC_AVAILABLE = False
 
+# Cache for API keys and judge configuration
+import threading
+_api_key_cache: dict = {}
+_judge_config_cache: dict = {}
+_api_cache_lock = threading.Lock()
+
+def _get_cached_api_key(key_name: str, alt_key_name: Optional[str] = None) -> Optional[str]:
+    """
+    Get API key from environment with caching and validation.
+    
+    Args:
+        key_name: Primary environment variable name.
+        alt_key_name: Alternative environment variable name (optional).
+        
+    Returns:
+        API key value or None.
+    """
+    global _api_key_cache
+    
+    cache_key = f"{key_name}|{alt_key_name or ''}"
+    
+    # Check cache first
+    if cache_key in _api_key_cache:
+        return _api_key_cache[cache_key]
+    
+    # Read from environment
+    key = os.getenv(key_name)
+    if not key and alt_key_name:
+        key = os.getenv(alt_key_name)
+    
+    result = key.strip() if key and key.strip() else None
+    
+    # Validate API key format if present
+    if result:
+        from phoenix_observability.utils.security import validate_api_key_format
+        
+        # Determine key type from key name
+        key_type = "openai" if "OPENAI" in key_name.upper() else \
+                   "anthropic" if "ANTHROPIC" in key_name.upper() else \
+                   "gemini" if "GEMINI" in key_name.upper() or "GOOGLE" in key_name.upper() else "openai"
+        
+        if not validate_api_key_format(result, key_type):
+            logger.warning(
+                f"API key format validation failed for {key_name}. "
+                f"Key may be invalid. Expected format for {key_type} provider."
+            )
+    
+    # Cache the result
+    with _api_cache_lock:
+        if cache_key not in _api_key_cache:
+            _api_key_cache[cache_key] = result
+        else:
+            result = _api_key_cache[cache_key]
+    
+    return result
+
+
+def _get_cached_judge_config(key_name: str, default: str = "") -> str:
+    """
+    Get judge configuration from environment with caching.
+    
+    Args:
+        key_name: Environment variable name.
+        default: Default value if not found.
+        
+    Returns:
+        Configuration value.
+    """
+    global _judge_config_cache
+    
+    # Check cache first
+    if key_name in _judge_config_cache:
+        return _judge_config_cache[key_name]
+    
+    # Read from environment
+    value = os.getenv(key_name, default)
+    if key_name == "JUDGE_PROVIDER":
+        value = value.lower()
+    
+    # Cache the result
+    with _api_cache_lock:
+        if key_name not in _judge_config_cache:
+            _judge_config_cache[key_name] = value
+        else:
+            value = _judge_config_cache[key_name]
+    
+    return value
+
+
+def clear_api_key_cache():
+    """
+    Clear the API key and judge config cache.
+    
+    Useful for testing or when API keys change at runtime.
+    """
+    global _api_key_cache, _judge_config_cache
+    with _api_cache_lock:
+        _api_key_cache.clear()
+        _judge_config_cache.clear()
+
+
 # Get API keys from environment (read at module load, but will re-read at runtime)
 def _get_openai_key():
-    key = os.getenv("OPENAI_API_KEY")
-    return key.strip() if key and key.strip() else None
+    return _get_cached_api_key("OPENAI_API_KEY")
 
 def _get_gemini_key():
-    key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    return key.strip() if key and key.strip() else None
+    return _get_cached_api_key("GEMINI_API_KEY", "GOOGLE_API_KEY")
 
 def _get_anthropic_key():
-    key = os.getenv("ANTHROPIC_API_KEY")
-    return key.strip() if key and key.strip() else None
+    return _get_cached_api_key("ANTHROPIC_API_KEY")
 
 # For backward compatibility, keep these but they'll be re-read at runtime
 OPENAI_API_KEY = _get_openai_key()
 GEMINI_API_KEY = _get_gemini_key()
 ANTHROPIC_API_KEY = _get_anthropic_key()
 
-# Judge model configuration (provider-specific defaults)
-JUDGE_MODEL = os.getenv("JUDGE_MODEL", "")  # Empty = auto-detect
-JUDGE_PROVIDER = os.getenv("JUDGE_PROVIDER", "").lower()  # "openai", "gemini", "anthropic", or "" for auto
+# Judge model configuration (provider-specific defaults) - cached
+JUDGE_MODEL = _get_cached_judge_config("JUDGE_MODEL", "")  # Empty = auto-detect
+JUDGE_PROVIDER = _get_cached_judge_config("JUDGE_PROVIDER", "").lower()  # "openai", "gemini", "anthropic", or "" for auto
 
 JUDGE_PROMPT_WITH_CONTEXT = """
 You are a hallucination detection assistant.
@@ -99,7 +197,7 @@ Return JSON:
 """
 
 
-def _simple_keyword_score(context: str, answer: str) -> dict:
+def _simple_keyword_score(context: str, answer: str) -> Dict[str, Any]:
     """Fallback heuristic using keyword overlap."""
 
     def tokenize(text):
@@ -143,12 +241,13 @@ def _detect_available_provider() -> Tuple[Optional[str], Optional[str]]:
         Tuple of (provider_name, model_name) or (None, None) if none available
         Priority: OpenAI > Gemini > Anthropic
     """
-    # Re-read API keys at runtime (in case they were set after module import)
+    # Get API keys (cached)
     openai_key = _get_openai_key()
     gemini_key = _get_gemini_key()
     anthropic_key = _get_anthropic_key()
-    judge_provider = os.getenv("JUDGE_PROVIDER", "").lower()
-    judge_model = os.getenv("JUDGE_MODEL", "")
+    # Get judge config (cached)
+    judge_provider = _get_cached_judge_config("JUDGE_PROVIDER", "").lower()
+    judge_model = _get_cached_judge_config("JUDGE_MODEL", "")
     
     # If provider is explicitly set, use it
     if judge_provider:
@@ -185,10 +284,11 @@ def _detect_available_provider() -> Tuple[Optional[str], Optional[str]]:
         return ("anthropic", model)
     
     # Log why no provider was found with detailed diagnostics
+    # SECURITY: Never log API key values, only indicate if set
     logger.error(f"❌ No LLM judge provider available!")
-    logger.error(f"   OpenAI: package_installed={OPENAI_AVAILABLE}, api_key={'✅ SET' if openai_key else '❌ NOT SET'}, key_preview={'...' + openai_key[-4:] if openai_key and len(openai_key) > 4 else 'N/A'}")
-    logger.error(f"   Gemini: package_installed={GEMINI_AVAILABLE}, api_key={'✅ SET' if gemini_key else '❌ NOT SET'}, key_preview={'...' + gemini_key[-4:] if gemini_key and len(gemini_key) > 4 else 'N/A'}")
-    logger.error(f"   Anthropic: package_installed={ANTHROPIC_AVAILABLE}, api_key={'✅ SET' if anthropic_key else '❌ NOT SET'}, key_preview={'...' + anthropic_key[-4:] if anthropic_key and len(anthropic_key) > 4 else 'N/A'}")
+    logger.error(f"   OpenAI: package_installed={OPENAI_AVAILABLE}, api_key={'✅ SET' if openai_key else '❌ NOT SET'}")
+    logger.error(f"   Gemini: package_installed={GEMINI_AVAILABLE}, api_key={'✅ SET' if gemini_key else '❌ NOT SET'}")
+    logger.error(f"   Anthropic: package_installed={ANTHROPIC_AVAILABLE}, api_key={'✅ SET' if anthropic_key else '❌ NOT SET'}")
     
     # Provide specific fix instructions
     if not OPENAI_AVAILABLE:
@@ -305,7 +405,7 @@ def judge_hallucination(
     answer: str = "",
     user_query: Optional[str] = None,
     use_llm: bool = True
-) -> Dict[str, any]:
+) -> Dict[str, Any]:
     """
     Run LLM judge if available, else fallback heuristic.
     
@@ -409,7 +509,8 @@ def judge_hallucination(
                                     "hallucinates": bool(data.get("hallucinates", False)),
                                     "reason": data.get("reason", "No reason provided")
                                 }
-                            except:
+                            except json.JSONDecodeError as e:
+                                logger.debug(f"Failed to parse JSON from judge response: {e}")
                                 pass
                         return {
                             "score": 0.5,
